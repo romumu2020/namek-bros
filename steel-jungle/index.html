@@ -439,8 +439,18 @@ document.addEventListener('visibilitychange', () => {
 });
 
 /* gamepads: pad 0 -> P1, pad 1 -> P2 */
+/* getGamepads() THROWS SecurityError when the page is embedded somewhere the
+   gamepad permissions policy disallows (artifact viewers, iframes, previews).
+   It is called every frame from step(), so an uncaught throw aborts the whole
+   update loop and freezes the game with dead input. Fail once, then stop
+   asking. */
+let padsBlocked = false;
 function pollPads() {
-  const gs = navigator.getGamepads ? navigator.getGamepads() : [];
+  if (padsBlocked) return;
+  let gs;
+  try { gs = navigator.getGamepads ? navigator.getGamepads() : []; }
+  catch (e) { padsBlocked = true; return; }
+  if (!gs) return;
   let n = 0;
   for (const g of gs) {
     if (!g || n > 1) continue;

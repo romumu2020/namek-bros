@@ -496,8 +496,16 @@ document.addEventListener('visibilitychange', () => {
 });
 
 /* gamepad */
+/* getGamepads() throws SecurityError where the gamepad permissions policy
+   disallows it (artifact viewers, iframes). Called every frame, so an
+   uncaught throw freezes the game. Fail once, then stop asking. */
+let padsBlocked = false;
 function pollPad() {
-  const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+  if (padsBlocked) return;
+  let gps;
+  try { gps = navigator.getGamepads ? navigator.getGamepads() : []; }
+  catch (e) { padsBlocked = true; return; }
+  if (!gps) return;
   for (const g of gps) {
     if (!g) continue;
     const ax = g.axes[0] || 0, ay = g.axes[1] || 0;
