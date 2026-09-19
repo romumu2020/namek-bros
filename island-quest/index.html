@@ -351,36 +351,84 @@ const Audio_ = {
     }
   },
 
-  /* Per-world melodies. Each entry: [semitone-offset-from-A3 or null, beats] */
-  tracks: [
-    [[4,1],[9,1],[11,1],[12,1],[11,1],[9,1],[7,2],[4,1],[7,1],[9,1],[11,1],[9,1],[7,1],[4,2]],
-    [[0,1],[3,1],[7,1],[10,1],[7,1],[3,1],[0,2],[2,1],[5,1],[9,1],[12,1],[9,1],[5,1],[2,2]],
-    [[7,1],[12,1],[14,1],[16,1],[14,1],[12,1],[11,2],[7,1],[11,1],[12,1],[14,1],[12,1],[11,1],[7,2]],
-    [[2,1],[5,1],[9,1],[14,1],[12,1],[9,1],[5,2],[2,1],[7,1],[10,1],[14,1],[10,1],[7,1],[2,2]],
-    [[9,1],[12,1],[16,1],[19,1],[16,1],[12,1],[9,2],[7,1],[11,1],[14,1],[18,1],[14,1],[11,1],[7,2]],
-    [[0,1],[1,1],[5,1],[8,1],[5,1],[1,1],[0,2],[3,1],[6,1],[10,1],[13,1],[10,1],[6,1],[3,2]],
-    [[5,1],[8,1],[12,1],[17,1],[15,1],[12,1],[8,2],[3,1],[7,1],[10,1],[15,1],[10,1],[7,1],[3,2]],
-    [[0,1],[6,1],[11,1],[12,1],[11,1],[6,1],[0,2],[1,1],[7,1],[12,1],[13,1],[12,1],[7,1],[1,2]]
-  ],
-  bass: [0,7,5,7],
+  /* ---- Afrobeats-flavoured score ----
+     The groove is what makes music read as afro, not the notes, so there is
+     a real 16-step drum grid under the melody: a syncopated kick landing off
+     the beat, a backbeat clap, hats filling the gaps. Melodies sit in minor
+     pentatonic and phrase in 3-3-2 over the top.
 
-  setTrack(i) { this.track = this.tracks[i % this.tracks.length]; this.seqI = 0; this.seqT = 0; },
+     These are ORIGINAL compositions written for this game. No existing song
+     is transcribed or arranged — that is what keeps the game safe to host
+     publicly under your own name. */
+  bpm: 104,
+  step: 0, stepT: 0, melI: 0, melWait: 0,
+
+  //        1   e   &   a   2   e   &   a   3   e   &   a   4   e   &   a
+  drums: ['K','h','.','K','S','h','K','h','.','h','K','.','S','K','h','h'],
+  bassLine: [0, 0, 5, 7],
+
+  /* [semitone above A3, length in 16ths]; null = rest */
+  tracks: [
+    // 1 JUNGLE — bright call-and-response
+    [[12,3],[10,3],[7,2],[5,3],[7,3],[10,2],[12,4],[null,2],
+     [10,3],[7,3],[5,2],[3,3],[5,3],[3,2],[0,6]],
+    // 2 CAVERN — low and brooding
+    [[0,3],[3,3],[5,2],[3,3],[0,3],[null,2],[0,4],
+     [7,3],[5,3],[3,2],[0,3],[3,3],[0,2],[null,4]],
+    // 3 GLACIER — high and airy
+    [[15,3],[12,3],[15,2],[17,3],[15,3],[12,2],[10,4],
+     [12,3],[15,3],[17,2],[19,3],[17,3],[15,2],[12,4]],
+    // 4 NIGHTWOOD — sparse, uneasy
+    [[7,3],[10,3],[7,2],[5,3],[3,3],[null,2],[3,4],
+     [5,3],[3,3],[0,2],[null,3],[0,3],[3,2],[0,6]],
+    // 5 HIGHLAND — driving, wide intervals
+    [[0,2],[7,2],[12,3],[10,3],[7,2],[5,2],[7,4],
+     [12,2],[15,2],[12,3],[10,3],[7,2],[5,2],[0,4]],
+    // 6 DEEPCAVE — chromatic unease
+    [[0,3],[1,3],[5,2],[8,3],[5,3],[1,2],[0,4],
+     [8,3],[10,3],[8,2],[5,3],[3,3],[1,2],[0,6]],
+    // 7 VOLCANO — urgent, tight phrasing
+    [[5,2],[8,2],[12,2],[15,2],[12,2],[8,2],[5,4],
+     [3,2],[7,2],[10,2],[14,2],[10,2],[7,2],[3,4]],
+    // 8 SKY TEMPLE — triumphant finale
+    [[0,3],[12,3],[10,2],[7,3],[10,3],[12,2],[15,4],
+     [17,3],[15,3],[12,2],[10,3],[7,3],[5,2],[0,6]]
+  ],
+
+  setTrack(i) {
+    this.track = this.tracks[i % this.tracks.length];
+    this.melI = 0; this.melWait = 0; this.step = 0; this.stepT = 0;
+  },
   stop() { this.track = null; },
 
   update(dt) {
     if (!this.ac || !this.track || !this.musicOn) return;
-    this.seqT -= dt;
-    if (this.seqT > 0) return;
-    const [semi, beats] = this.track[this.seqI % this.track.length];
-    const spb = 60 / this.bpm;
-    if (semi !== null) {
-      const f = 220 * Math.pow(2, semi / 12);
-      this.tone(f, spb * beats * .85, 'square', .07);
-      const bs = this.bass[Math.floor(this.seqI / 4) % 4];
-      this.tone(110 * Math.pow(2, bs / 12), spb * beats * .9, 'triangle', .09);
+    this.stepT -= dt;
+    if (this.stepT > 0) return;
+    const sixteenth = 60 / this.bpm / 4;
+    this.stepT = sixteenth;
+
+    const i = this.step % 16;
+    const d = this.drums[i];
+    if (d === 'K')      this.tone(64, .13, 'sine', .30, 34);   // kick
+    else if (d === 'S') this.noise(.06, .085);                  // clap
+    else if (d === 'h') this.noise(.018, .03);                  // hat
+
+    /* the bass lands off the downbeat too — most of the afro feel is here */
+    if (i === 0 || i === 6 || i === 10) {
+      const b = this.bassLine[Math.floor(this.step / 16) % this.bassLine.length];
+      this.tone(55 * Math.pow(2, b / 12), sixteenth * 3, 'triangle', .11);
     }
-    this.seqT = spb * beats;
-    this.seqI++;
+
+    if (this.melWait <= 0) {
+      const [semi, steps] = this.track[this.melI % this.track.length];
+      if (semi !== null)
+        this.tone(220 * Math.pow(2, semi / 12), sixteenth * steps * .9, 'square', .075);
+      this.melWait = steps;
+      this.melI++;
+    }
+    this.melWait--;
+    this.step++;
   }
 };
 
@@ -831,6 +879,31 @@ const P = {
 let ents = [], shots = [], fx = [];
 
 /* ---------- physics constants ---------- */
+/* Per-world MODES. The eight themes were purely cosmetic — every stage
+   played identically and only the palette changed. A mode changes a RULE,
+   which is what actually makes stage 7 feel unlike stage 2. Worlds not yet
+   given a mode fall through to 'normal', so nothing breaks.
+
+   DISABLED for now — every entry is 'normal', so the ice and auto-scroll
+   branches below never execute and stages play exactly as they always have.
+   The two that were built and tested:
+     world 3 -> { id:'ice',    label:'SLIPPERY ICE' }   slippery momentum
+     world 5 -> { id:'scroll', label:'KEEP MOVING!' }   screen pushes you
+   Auto-scroll additionally needs the player clamped to G.cam instead of
+   world 0 (see 'world bounds'), or the advancing screen leaves you behind
+   off-frame — that fix is NOT applied here. */
+const MODES = [
+  { id:'normal', label:'' },
+  { id:'normal', label:'' },
+  { id:'normal', label:'' },
+  { id:'normal', label:'' },
+  { id:'normal', label:'' },
+  { id:'normal', label:'' },
+  { id:'normal', label:'' },
+  { id:'normal', label:'' }
+];
+const mode = () => MODES[G.world % MODES.length].id;
+
 const GRAV = 0.42, MAXFALL = 7.2;
 const ACC = 0.55, FRIC = 0.72, MAXSPD = 2.35, BOARDSPD = 3.55;
 const JUMPV = -7.4, JUMPHOLD = 9;
@@ -883,9 +956,11 @@ function loadStage() {
   P.axe = false; P.board = false; P.fairy = 0;
 
   Audio_.setTrack(G.world);
-  Audio_.bpm = S.boss ? 172 : 150;
+  Audio_.bpm = S.boss ? 128 : 104;        // boss fights run hotter
   G.grace = 2.0;                 // vitality holds while the stage title shows
-  say(`WORLD ${G.world + 1}-${G.area + 1}   ${S.theme.name}`, 2.0);
+  const md = MODES[G.world % MODES.length];
+  say(`WORLD ${G.world + 1}-${G.area + 1}   ${S.theme.name}` +
+      (md.label && !S.boss ? '\n' + md.label : ''), 2.2);
 }
 
 /* ============================ 11. ENEMIES ================================ */
@@ -950,10 +1025,15 @@ function updatePlayer(dt) {
     if (Key.l) P.vx -= ACC * .35;
     if (Key.r) P.vx += ACC * .35;
   } else if (!P.duck) {
-    if (Key.l) { P.vx -= ACC; P.face = -1; }
-    else if (Key.r) { P.vx += ACC; P.face = 1; }
-    else if (P.ground) P.vx *= FRIC;
-  } else P.vx *= FRIC;
+    /* On ice you accelerate slowly and barely decelerate, so you carry
+       momentum into every jump and cannot stop on a ledge edge. */
+    const icy = mode() === 'ice' && P.ground;
+    const acc  = icy ? ACC * 0.40 : ACC;
+    const fric = icy ? 0.975 : FRIC;
+    if (Key.l) { P.vx -= acc; P.face = -1; }
+    else if (Key.r) { P.vx += acc; P.face = 1; }
+    else if (P.ground) P.vx *= fric;
+  } else P.vx *= (mode() === 'ice' ? 0.985 : FRIC);
 
   P.vx = Math.max(-maxs, Math.min(maxs, P.vx));
   if (Math.abs(P.vx) < .06) P.vx = 0;
@@ -991,8 +1071,13 @@ function updatePlayer(dt) {
 
   moveActor(P, true);
 
-  /* --- world bounds --- */
-  if (P.x < 0) { P.x = 0; P.vx = 0; }
+  /* --- world bounds ---
+     Clamp to the camera's left edge, not to world 0. On an auto-scroll stage
+     that clamp IS the mechanic: the advancing screen pushes you along and you
+     can never be left behind off-frame. Elsewhere the camera never scrolls
+     back, so it also stops you walking off the left of the view. */
+  const leftWall = Math.max(0, G.cam);
+  if (P.x < leftWall) { P.x = leftWall; if (P.vx < 0) P.vx = 0; }
   const maxX = G.stage.W * TS - P.w;
   if (P.x > maxX) { P.x = maxX; P.vx = 0; }
   if (P.y > VH + 40) { killPlayer(); return; }
@@ -1695,8 +1780,18 @@ function drawHUD() {
   /* centre message */
   if (G.msgT > 0) {
     ctx.globalAlpha = Math.min(1, G.msgT * 2);
-    text(G.msg, VW / 2, VH / 2 - 34, '#fff', 10, 'center');
+    const lines = String(G.msg).split('\n');
+    lines.forEach((ln, i) =>
+      text(ln, VW / 2, VH / 2 - 34 + i * 14, i ? '#60d0d0' : '#fff', i ? 9 : 10, 'center'));
     ctx.globalAlpha = 1;
+  }
+
+  /* persistent mode badge — on an auto-scroll stage you need to know the
+     screen is pushing you, not that something is broken */
+  const md = MODES[G.world % MODES.length];
+  if (md.label && !G.stage.boss) {
+    const warn = md.id === 'scroll' && (Math.floor(G.tick * 3) & 1);
+    text(md.label, VW - 4, 32, warn ? '#f0d030' : '#60d0d0', 7, 'right');
   }
 }
 
@@ -1974,11 +2069,22 @@ function step(dt) {
       updateEnts(dt);
       updateShots(dt);
       updateFx(dt);
-      /* camera: lead the player, never scroll back past boss arena */
+      /* camera: lead the player, never scroll back past the boss arena */
       {
-        const target = P.x - VW * .38;
         const maxCam = G.stage.W * TS - VW;
-        G.cam += (Math.max(0, Math.min(maxCam, target)) - G.cam) * .12;
+        if (mode() === 'scroll' && !G.stage.boss) {
+          /* The screen advances on its own. The player is already clamped to
+             the camera's left edge, so you can never be left behind — the
+             pressure is that you cannot stop, backtrack or farm fruit.
+             Runs ~1.6px/frame against a 2.35px/frame top speed, so there is
+             room to stay ahead but none to dawdle. */
+          G.cam = Math.min(maxCam, G.cam + 1.6);
+          const lead = P.x - VW * .38;
+          if (lead > G.cam) G.cam = Math.min(maxCam, lead);
+        } else {
+          const target = P.x - VW * .38;
+          G.cam += (Math.max(0, Math.min(maxCam, target)) - G.cam) * .12;
+        }
         if (G.cam < 0) G.cam = 0;
       }
       break;
