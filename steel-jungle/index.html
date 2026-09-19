@@ -396,7 +396,38 @@ async function requestWakeLock() {
     wakeLock = await navigator.wakeLock.request('screen');
   } catch (e) {}
 }
-function unlock(){ Audio_.init(); Audio_.resume(); requestWakeLock(); }
+
+/* ---- iOS: make sound survive the hardware mute switch ----
+   Safari puts a bare AudioContext in the 'ambient' audio-session category,
+   which the ringer switch silences — so Web Audio goes silent on a phone set
+   to vibrate even though the context reports "running" and nodes really are
+   playing. HTML5 <audio> IS allowed through the mute switch, and playing one
+   promotes the whole session. Three layers, best first:
+     1. navigator.audioSession.type = 'playback'  (Safari 16.4+)
+     2. a looping near-silent <audio> element      (older iOS)
+     3. a silent buffer started inside the gesture (classic unlock) */
+let _iosAudioDone = false;
+function iosUnlock() {
+  if (_iosAudioDone) return;
+  _iosAudioDone = true;
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+  try {
+    const a = document.createElement('audio');
+    a.setAttribute('playsinline', ''); a.loop = true; a.volume = 0.001;
+    a.src = 'data:audio/wav;base64,UklGRrQBAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YZABAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA';
+    const pr = a.play(); if (pr && pr.catch) pr.catch(() => {});
+    window.__silentEl = a;               // keep a reference so it is not GC'd
+  } catch (e) {}
+  try {
+    if (Audio_.ac) {
+      const b = Audio_.ac.createBuffer(1, 1, 22050);
+      const s = Audio_.ac.createBufferSource();
+      s.buffer = b; s.connect(Audio_.ac.destination); s.start(0);
+    }
+  } catch (e) {}
+}
+
+function unlock(){ Audio_.init(); Audio_.resume(); iosUnlock(); requestWakeLock(); }
 function capture(el, id){ try { el.setPointerCapture(id); } catch (e) {} }
 
 const dpad = document.getElementById('dpad'), nub = document.getElementById('nub');
