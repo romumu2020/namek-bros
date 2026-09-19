@@ -1,0 +1,1674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Island Quest</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:#0a0a12;overflow:hidden;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    -webkit-user-select:none;user-select:none;
+    -webkit-tap-highlight-color:transparent;
+    /* `none` alone does NOT stop iOS Safari's double-tap zoom; `manipulation` does */
+    touch-action:manipulation;overscroll-behavior:none}
+
+  #wrap{position:fixed;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;
+    padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px)
+            env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}
+  canvas{image-rendering:pixelated;image-rendering:crisp-edges;display:block;
+    box-shadow:0 0 0 2px #000,0 0 40px rgba(0,0,0,.9);touch-action:none}
+
+  /* Portrait phones: the pad sits BELOW the canvas in the dead space, so
+     thumbs never cover the action. Landscape has no spare height, so there
+     the pad overlays the margins instead. */
+  #stage{display:flex;align-items:center;justify-content:center;width:100%}
+  body.touch #stage{flex:1 1 auto;min-height:0}
+  #touch{display:none;width:100%;position:relative;touch-action:none;
+    flex:0 0 clamp(205px,30vh,280px)}
+  body.touch #touch{display:block}
+
+  #dpad{position:absolute;left:5%;bottom:12px;width:170px;height:170px;
+    border-radius:50%;background:rgba(255,255,255,.07);
+    border:2px solid rgba(255,255,255,.16);touch-action:none}
+  #dpad .dp{position:absolute;color:rgba(255,255,255,.5);font-size:22px;
+    line-height:1;pointer-events:none}
+  #dpad .dpL{left:12px;top:50%;transform:translateY(-50%)}
+  #dpad .dpR{right:12px;top:50%;transform:translateY(-50%)}
+  #dpad .dpD{bottom:10px;left:50%;transform:translateX(-50%)}
+  #nub{position:absolute;left:50%;top:50%;width:62px;height:62px;
+    margin:-31px 0 0 -31px;border-radius:50%;background:rgba(255,255,255,.20);
+    border:2px solid rgba(255,255,255,.34);pointer-events:none;
+    transition:background .08s}
+  #dpad.on #nub{background:rgba(255,255,255,.38)}
+
+  #acts{position:absolute;right:5%;bottom:12px;width:190px;height:180px}
+  .btn{position:absolute;display:flex;align-items:center;justify-content:center;
+    border-radius:50%;font-size:14px;font-weight:700;letter-spacing:.5px;
+    color:rgba(255,255,255,.85);touch-action:none}
+  .btn.on{filter:brightness(1.75)}
+  #bA{right:0;bottom:0;width:104px;height:104px;
+    background:rgba(72,208,72,.24);border:2px solid rgba(72,208,72,.55)}
+  #bB{left:0;bottom:64px;width:88px;height:88px;
+    background:rgba(240,150,120,.24);border:2px solid rgba(240,150,120,.55)}
+
+  @media (orientation:landscape){
+    body.touch #touch{position:fixed;inset:0;flex:none;z-index:10;
+      pointer-events:none}
+    #dpad,#acts{pointer-events:auto}
+    #dpad{left:10px;bottom:10px;width:150px;height:150px}
+    #acts{right:10px;bottom:10px;width:170px;height:160px}
+    #bA{width:92px;height:92px}
+    #bB{width:78px;height:78px;bottom:58px}
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage"><canvas id="c"></canvas></div>
+  <div id="touch">
+    <div id="dpad">
+      <div class="dp dpL">◀</div><div class="dp dpR">▶</div><div class="dp dpD">▼</div>
+      <div id="nub"></div>
+    </div>
+    <div id="acts">
+      <div class="btn" id="bB">FIRE</div>
+      <div class="btn" id="bA">JUMP</div>
+    </div>
+  </div>
+</div>
+<script>
+"use strict";
+/* ============================================================================
+   ISLAND QUEST  —  an original tribute to the 8-bit jungle-runner genre.
+   All art is drawn procedurally from code. All music is synthesized live.
+   No copyrighted assets are used or required.
+   ========================================================================== */
+
+/* ============================ 1. CONFIG ================================== */
+const VW = 256, VH = 240;          // virtual resolution (NES native)
+const TS = 16;                     // tile size
+const COLS = VW / TS, ROWS = VH / TS;
+const WORLDS = 8, AREAS = 4;
+
+const cvs = document.getElementById('c');
+const ctx = cvs.getContext('2d', { alpha: false });
+ctx.imageSmoothingEnabled = false;
+cvs.width = VW; cvs.height = VH;
+
+const isTouch = matchMedia('(pointer:coarse)').matches;
+if (isTouch) document.body.classList.add('touch');
+
+/* Pixel art must scale by whole numbers or pixels come out uneven — but the
+   integer has to be counted in DEVICE pixels, not CSS pixels. Counting in CSS
+   px gives floor(390/256) = 1 on a phone, i.e. a postage stamp. Counting in
+   device px on the same phone (dpr 3) gives 4, and because the backing store
+   stays at 256x240 each game pixel lands on exactly 4 device pixels — larger
+   AND still perfectly crisp. */
+const stage = document.getElementById('stage');
+function fit() {
+  const dpr = window.devicePixelRatio || 1;
+  // On touch, #stage is flex:1 so it reports exactly the room left above the
+  // control pad — measuring beats guessing a fraction of the viewport.
+  const box = isTouch ? stage.getBoundingClientRect() : null;
+  const availW = box && box.width  ? box.width  : innerWidth;
+  const availH = box && box.height ? box.height : innerHeight;
+  const s = Math.max(1, Math.floor(Math.min(availW * dpr / VW, availH * dpr / VH)));
+  cvs.style.width  = (VW * s / dpr) + 'px';
+  cvs.style.height = (VH * s / dpr) + 'px';
+}
+addEventListener('resize', fit);
+addEventListener('orientationchange', () => setTimeout(fit, 150));
+fit(); requestAnimationFrame(fit);   // second pass once flex has settled
+
+/* ============================ 2. SPRITES ================================= */
+/* Sprites are strings; each char indexes a palette. '.' = transparent.
+   Every sprite is baked once into an offscreen canvas (plus a flipped copy)
+   so the render path is drawImage, not thousands of fillRects per frame. */
+
+const PAL = {
+  s:'#f0b888', S:'#c88050',            // skin, skin shadow
+  h:'#201810', H:'#403020',            // hair, hair light
+  g:'#48b048', G:'#2c7c2c',            // grass green, dark green
+  w:'#ffffff', k:'#000000',
+  r:'#e03030', R:'#902020',            // red
+  b:'#3060d0', B:'#204090',            // blue
+  y:'#f0d030', Y:'#c09000',            // yellow
+  o:'#f08030', O:'#b05010',            // orange
+  p:'#c060d0', P:'#803090',            // purple
+  c:'#60d0d0', C:'#2090a0',            // cyan
+  n:'#a07050', N:'#6b4630',            // brown
+  e:'#909090', E:'#585858',            // grey
+  m:'#d0d0d0'                          // light grey
+};
+
+function bake(rows) {
+  const w = rows[0].length, h = rows.length;
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const g = cv.getContext('2d');
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const ch = rows[y][x];
+    if (ch === '.') continue;
+    g.fillStyle = PAL[ch] || '#f0f'; g.fillRect(x, y, 1, 1);
+  }
+  const fl = document.createElement('canvas'); fl.width = w; fl.height = h;
+  const fg = fl.getContext('2d');
+  fg.translate(w, 0); fg.scale(-1, 1); fg.drawImage(cv, 0, 0);
+  return { c: cv, f: fl, w, h };
+}
+
+const SPR = {};
+function def(name, rows) { SPR[name] = bake(rows); }
+
+/* ---- hero: 12 wide x 20 tall ---- */
+def('stand', [
+  '....hhhh....','...hhhhhh...','..hhhhhhhh..','..hssssssh..',
+  '..hskssksh..','..hssssssh..','..hsSssSsh..','...hssssh...',
+  '....ssss....','...ssssss...','..sssssssss.','.gsssssssssg',
+  '.gggggggggg.','.GgGgGgGgGg.','..ssssssss..','..ss....ss..',
+  '..ss....ss..','..ss....ss..','.nnn....nnn.','.nnn....nnn.'
+]);
+def('run0', [
+  '....hhhh....','...hhhhhh...','..hhhhhhhh..','..hssssssh..',
+  '..hskssksh..','..hssssssh..','..hsSssSsh..','...hssssh...',
+  '....ssss....','..ssssssss..','.sssssssss..','.gsssssssg..',
+  '.gggggggg...','.GgGgGgGg...','..ssssss....','..ss..ss....',
+  '.ss....ss...','.ss.....ss..','nnn......nnn','nn........nn'
+]);
+def('run1', [
+  '....hhhh....','...hhhhhh...','..hhhhhhhh..','..hssssssh..',
+  '..hskssksh..','..hssssssh..','..hsSssSsh..','...hssssh...',
+  '....ssss....','...ssssss...','..sssssssss.','..gssssssg..',
+  '..gggggggg..','..GgGgGgGg..','...ssssss...','...ss.ss....',
+  '...ss.ss....','...ss..ss...','..nnn..nnn..','..nnn..nnn..'
+]);
+def('jump', [
+  '....hhhh....','...hhhhhh...','..hhhhhhhh..','..hssssssh..',
+  '..hskssksh..','..hssssssh..','.shsssssshs.','ss.hssssh.ss',
+  'ss..ssss..ss','.....ss.....','..sssssssss.','.gsssssssssg',
+  '.gggggggggg.','.GgGgGgGgGg.','..ssssssss..','.ss......ss.',
+  '.ss......ss.','ss........ss','nnn......nnn','nn........nn'
+]);
+def('duck', [
+  '............','............','............','............',
+  '....hhhh....','...hhhhhh...','..hhhhhhhh..','..hssssssh..',
+  '..hskssksh..','..hssssssh..','...hssssh...','..sssssssss.',
+  '.gsssssssssg','.gggggggggg.','.GgGgGgGgGg.','..ssssssss..',
+  '..ss....ss..','.nnn....nnn.','.nnn....nnn.','.nnnn..nnnn.'
+]);
+def('hurt', [
+  '....hhhh....','...hhhhhh...','..hhhhhhhh..','..hssssssh..',
+  '..hsrssrsh..','..hssssssh..','..hsSssSsh..','...hssssh...',
+  '....ssss....','.ssssssssss.','.sssssssss..','.gsssssssg..',
+  '.gggggggg...','.GgGgGgGg...','..ssssss....','..ss..ss....',
+  '.ss....ss...','.ss....ss...','nnn....nnn..','nn......nn..'
+]);
+def('board', [
+  '.mmmmmmmmmm.','mEEEEEEEEEEm','.E.E....E.E.','..k......k..'
+]);
+
+/* ---- weapons / pickups ---- */
+def('axe', ['.eeee.','eemmee','.eemme','..nn..','..nn..','..nn..']);
+def('fireb', ['.oo.','oyyo','oyyo','.oo.']);
+
+def('fruitA', ['..rr..','.rrrr.','rrrrrr','rrrrrr','.rrrr.','..GG..']);   // apple
+def('fruitB', ['..GG..','.yyyy.','yyyyyy','yyyyyy','.yyyy.','..yy..']);   // melon
+def('fruitC', ['.pppp.','pppppp','pppppp','.pppp.','..pp..','..G...']);   // grape
+def('milk',   ['.wwww.','wwwwww','wbbbbw','wbwbbw','wbbbbw','wwwwww']);
+def('egg',    ['..wwww..','.wwwwww.','wwwwwwww','wwwwwwww','wwwwwwww','wwwwwwww','.wwwwww.','..wwww..']);
+/* bright rim, not hair-black: this sits on a dark HUD bar */
+def('life',   ['.y.yy.y.','yyyyyyyy','yssssssy','yskssksy','yssssssy','.yssssy.','..yssy..','...yy...']);
+def('fairy',  ['..cc..','.cwwc.','cwwwwc','cwwwwc','.cwwc.','..cc..']);
+
+/* ---- enemies ---- */
+def('snail', [
+  '........nn......','.......nnnn.....','......nNNNNn....','.....nNnnnnNn...',
+  '....nNnNNNNnNn..','....nNnNnnNnNn..','....nNnNNNNnNn..','....nNnnnnnnNn..',
+  '.....nNNNNNNn...','..yy..nnnnnn....','.yyyy...........','yyyyyyyyyyyy....',
+  '.yyyyyyyyyyy....','..y.y....y.y....'
+]);
+def('frog0', [
+  '..GG....GG..','.GGGG..GGGG.','GGwGGGGGGwGG','GGkGGGGGGkGG',
+  'GGGGGGGGGGGG','GGGGGGGGGGGG','gGGGGGGGGGGg','gggGGGGGGggg',
+  'gg.gggggg.gg','g...gggg...g'
+]);
+def('frog1', [
+  '..GG....GG..','.GGGG..GGGG.','GGwGGGGGGwGG','GGkGGGGGGkGG',
+  'GGGGGGGGGGGG','gGGGGGGGGGGg','g.GGGGGGGG.g','..gggggggg..',
+  'gg........gg','g..........g'
+]);
+def('crow0', [
+  '.pp........pp.','ppp........ppp','.ppp......ppp.','..pppppppppp..',
+  '...pppwkpppp..','....pppppppo..','.....pppppp...','......pppp....'
+]);
+def('crow1', [
+  '..............','......pp......','.....pppp.....','..pppppppppp..',
+  'ppppppwkppppp.','.pppppppppo...','..pppppppp....','...pp....pp...'
+]);
+def('spider', [
+  'k.k......k.k','.k.k....k.k.','..kkkkkkkk..','.kkkkkkkkkk.',
+  'kkkrkkkkrkkk','kkkkkkkkkkkk','.kkkkkkkkkk.','..kkkkkkkk..'
+]);
+def('snake', [
+  '....GGGG....','...GGGGGG...','..GGkGGkGG..','..GGGGGGGG..',
+  '...GGrrGG...','....GGGG....','...GGGGGG...','..GGGGGGGG..',
+  '.GGGGGGGGGG.','GGGGGGGGGGGG'
+]);
+def('rock', [
+  '...eeeeee...','..eeeeeeee..','.eEeeeeeeEe.','eeeeeeeeeeee',
+  'eEeeeeeeeeEe','eeeeeeeeeeee','eeEeeeeeeEee','.eeeeeeeeee.',
+  '..eeeeeeee..','...eeeeee...'
+]);
+def('flame0', ['..o..','.ooo.','oyyyo','oyryo','ooooo']);
+def('flame1', ['..o..','.oyo.','oyyyo','oyryo','.ooo.']);
+
+/* ---- boss: 32x32 tribal mask ---- */
+def('boss', [
+  '....pppppppppppppppppppppp....','..pppppppppppppppppppppppppp..',
+  '.pppppppppppppppppppppppppppp.','pppppppppppppppppppppppppppppp',
+  'pppPPPpppppppppppppppppPPPpppp','ppPPPPPPppppppppppppPPPPPPpppp',
+  'pPPwwwPPPpppppppppppPPwwwPPPpp','pPwwwwwPPpppppppppppPwwwwwPPpp',
+  'pPwwkwwPPpppppppppppPwwkwwPPpp','pPwwwwwPPpppppppppppPwwwwwPPpp',
+  'pPPwwwPPPpppppppppppPPwwwPPPpp','ppPPPPPPppppppppppppPPPPPPpppp',
+  'pppPPPpppppppppppppppppPPPpppp','pppppppppppppppppppppppppppppp',
+  'ppppppppppppyyyyyypppppppppppp','pppppppppppyyyyyyyyppppppppppp',
+  'ppppppppppyyyyyyyyyypppppppppp','pppppppppppyyyyyyyyppppppppppp',
+  'ppppppppppppyyyyyypppppppppppp','pppppppppppppppppppppppppppppp',
+  'ppRRRRRRRRRRRRRRRRRRRRRRRRRRpp',
+  'ppRRwwRRwwRRwwRRwwRRwwRRwwRRpp','ppRRwwRRwwRRwwRRwwRRwwRRwwRRpp',
+  'ppRRRRRRRRRRRRRRRRRRRRRRRRRRpp','pppRRRRRRRRRRRRRRRRRRRRRRRRppp',
+  'pppppppppppppppppppppppppppppp','.pppppppppppppppppppppppppppp.',
+  '..pppppppppppppppppppppppppp..','...pppppppppppppppppppppppp...',
+  '.....pppppppppppppppppppp.....','.......pppppppppppppppp.......',
+  '..........pppppppppp..........'
+]);
+
+/* ============================ 3. AUDIO =================================== */
+/* Tiny chiptune engine: 2 pulse voices + noise. All melodies original. */
+const Audio_ = {
+  ac: null, master: null, musicOn: true, sfxOn: true,
+  seqT: 0, seqI: 0, track: null, bpm: 150,
+
+  init() {
+    if (this.ac) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    this.ac = new AC();
+    this.master = this.ac.createGain();
+    this.master.gain.value = 0.22;
+    this.master.connect(this.ac.destination);
+  },
+  resume() { if (this.ac && this.ac.state === 'suspended') this.ac.resume(); },
+
+  tone(freq, dur, type, vol, slide) {
+    if (!this.ac || !this.sfxOn) return;
+    const t = this.ac.currentTime;
+    const o = this.ac.createOscillator(), g = this.ac.createGain();
+    o.type = type || 'square'; o.frequency.setValueAtTime(freq, t);
+    if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+    g.gain.setValueAtTime(vol || 0.2, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(this.master); o.start(t); o.stop(t + dur + .02);
+  },
+  noise(dur, vol) {
+    if (!this.ac || !this.sfxOn) return;
+    const t = this.ac.currentTime, n = Math.floor(this.ac.sampleRate * dur);
+    const buf = this.ac.createBuffer(1, n, this.ac.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+    const s = this.ac.createBufferSource(); s.buffer = buf;
+    const g = this.ac.createGain(); g.gain.value = vol || 0.18;
+    s.connect(g); g.connect(this.master); s.start(t);
+  },
+
+  sfx(name) {
+    switch (name) {
+      case 'jump':   this.tone(330, .13, 'square', .16, 720); break;
+      case 'throw':  this.tone(880, .06, 'square', .12, 440); break;
+      case 'pick':   this.tone(660, .07, 'square', .15); setTimeout(()=>this.tone(990,.09,'square',.15),60); break;
+      case 'egg':    this.tone(520, .05, 'square', .14); setTimeout(()=>this.tone(780,.05,'square',.14),50);
+                     setTimeout(()=>this.tone(1040,.10,'square',.14),100); break;
+      case 'kill':   this.noise(.12, .14); this.tone(200, .12, 'square', .10, 60); break;
+      case 'hurt':   this.tone(160, .32, 'sawtooth', .20, 40); this.noise(.2,.12); break;
+      case 'die':    [523,494,440,392,330,262].forEach((f,i)=>setTimeout(()=>this.tone(f,.20,'square',.20),i*110)); break;
+      case 'clear':  [523,659,784,1047].forEach((f,i)=>setTimeout(()=>this.tone(f,.16,'square',.20),i*100)); break;
+      case 'boss':   this.tone(90, .5, 'sawtooth', .22, 55); this.noise(.4,.16); break;
+      case 'bhit':   this.tone(140, .09, 'square', .16, 80); this.noise(.07,.12); break;
+      case '1up':    [659,784,988,1319].forEach((f,i)=>setTimeout(()=>this.tone(f,.13,'triangle',.20),i*80)); break;
+      case 'board':  this.tone(220, .18, 'triangle', .16, 560); break;
+      case 'start':  [392,523,659,784].forEach((f,i)=>setTimeout(()=>this.tone(f,.14,'square',.20),i*90)); break;
+    }
+  },
+
+  /* Per-world melodies. Each entry: [semitone-offset-from-A3 or null, beats] */
+  tracks: [
+    [[4,1],[9,1],[11,1],[12,1],[11,1],[9,1],[7,2],[4,1],[7,1],[9,1],[11,1],[9,1],[7,1],[4,2]],
+    [[0,1],[3,1],[7,1],[10,1],[7,1],[3,1],[0,2],[2,1],[5,1],[9,1],[12,1],[9,1],[5,1],[2,2]],
+    [[7,1],[12,1],[14,1],[16,1],[14,1],[12,1],[11,2],[7,1],[11,1],[12,1],[14,1],[12,1],[11,1],[7,2]],
+    [[2,1],[5,1],[9,1],[14,1],[12,1],[9,1],[5,2],[2,1],[7,1],[10,1],[14,1],[10,1],[7,1],[2,2]],
+    [[9,1],[12,1],[16,1],[19,1],[16,1],[12,1],[9,2],[7,1],[11,1],[14,1],[18,1],[14,1],[11,1],[7,2]],
+    [[0,1],[1,1],[5,1],[8,1],[5,1],[1,1],[0,2],[3,1],[6,1],[10,1],[13,1],[10,1],[6,1],[3,2]],
+    [[5,1],[8,1],[12,1],[17,1],[15,1],[12,1],[8,2],[3,1],[7,1],[10,1],[15,1],[10,1],[7,1],[3,2]],
+    [[0,1],[6,1],[11,1],[12,1],[11,1],[6,1],[0,2],[1,1],[7,1],[12,1],[13,1],[12,1],[7,1],[1,2]]
+  ],
+  bass: [0,7,5,7],
+
+  setTrack(i) { this.track = this.tracks[i % this.tracks.length]; this.seqI = 0; this.seqT = 0; },
+  stop() { this.track = null; },
+
+  update(dt) {
+    if (!this.ac || !this.track || !this.musicOn) return;
+    this.seqT -= dt;
+    if (this.seqT > 0) return;
+    const [semi, beats] = this.track[this.seqI % this.track.length];
+    const spb = 60 / this.bpm;
+    if (semi !== null) {
+      const f = 220 * Math.pow(2, semi / 12);
+      this.tone(f, spb * beats * .85, 'square', .07);
+      const bs = this.bass[Math.floor(this.seqI / 4) % 4];
+      this.tone(110 * Math.pow(2, bs / 12), spb * beats * .9, 'triangle', .09);
+    }
+    this.seqT = spb * beats;
+    this.seqI++;
+  }
+};
+
+/* ============================ 4. INPUT =================================== */
+const Key = { l:0, r:0, u:0, d:0, a:0, b:0, start:0 };
+const edge = {};
+
+/* Rising edges are captured the moment the event arrives, NOT by comparing
+   state at 60Hz step boundaries. Sampling dropped any tap shorter than one
+   frame (~16ms) completely — a quick jump press simply never happened, which
+   is what made the controls feel laggy and unreliable. */
+function setKey(k, v) {
+  if (v && !Key[k]) edge[k] = 1;
+  Key[k] = v ? 1 : 0;
+}
+const MAP = {
+  ArrowLeft:'l', KeyA:'l', ArrowRight:'r', KeyD:'r',
+  ArrowUp:'u', KeyW:'u', ArrowDown:'d', KeyS:'s_d',
+  Space:'a', KeyZ:'a', KeyK:'a',
+  KeyX:'b', KeyJ:'b', ShiftLeft:'b',
+  Enter:'start', Escape:'start'
+};
+addEventListener('keydown', e => {
+  const k = MAP[e.code]; if (!k) return;
+  e.preventDefault(); setKey(k === 's_d' ? 'd' : k, 1);
+  Audio_.init(); Audio_.resume();
+}, { passive: false });
+addEventListener('keyup', e => {
+  const k = MAP[e.code]; if (!k) return;
+  e.preventDefault(); setKey(k === 's_d' ? 'd' : k, 0);
+}, { passive: false });
+
+function pressed(k) { if (edge[k]) { edge[k] = 0; return true; } return false; }
+function latch() { for (const k in edge) edge[k] = 0; }
+
+/* ---------------- touch controls: Pointer Events, not Touch Events ----------
+   Each control captures its pointer on pointerdown. Capture guarantees the
+   element still receives pointerup even when the thumb slides outside its
+   bounds — without it, a finger that drifts off JUMP leaves the button held
+   down forever. That stuck-button case is the classic on-screen-gamepad bug
+   and it is exactly what the old per-element touchstart/touchend had.
+
+   The d-pad captures to the WHOLE ZONE rather than to separate arrow buttons,
+   so direction comes from thumb position and you can slide left<->right
+   without lifting — which per-button capture would otherwise prevent. */
+
+let wakeLock = null;
+async function requestWakeLock() {
+  try {
+    if (!('wakeLock' in navigator) || document.hidden) return;
+    if (wakeLock && !wakeLock.released) return;
+    wakeLock = await navigator.wakeLock.request('screen');
+  } catch (e) { /* refused (low battery) or unsupported — never fatal */ }
+}
+function unlockAudio() { Audio_.init(); Audio_.resume(); requestWakeLock(); }
+
+const dpad = document.getElementById('dpad');
+const nub  = document.getElementById('nub');
+let dirId = null;
+
+function dpadSet(e) {
+  const r = dpad.getBoundingClientRect();
+  const dx = (e.clientX - (r.left + r.width  / 2)) / (r.width  / 2);
+  const dy = (e.clientY - (r.top  + r.height / 2)) / (r.height / 2);
+  const DEAD = 0.22;
+  setKey('l', dx < -DEAD);
+  setKey('r', dx >  DEAD);
+  setKey('d', dy > 0.34 && Math.abs(dx) < 0.55);
+  const m = Math.min(1, Math.hypot(dx, dy)), a = Math.atan2(dy, dx);
+  nub.style.transform = `translate(${(Math.cos(a)*m*44).toFixed(1)}px,${(Math.sin(a)*m*44).toFixed(1)}px)`;
+}
+function dpadClear() {
+  dirId = null; setKey('l',0); setKey('r',0); setKey('d',0);
+  dpad.classList.remove('on'); nub.style.transform = '';
+}
+/* setPointerCapture throws NotFoundError if the id isn't an active pointer;
+   an uncaught throw here would kill the control entirely */
+function capture(el, id) { try { el.setPointerCapture(id); } catch (e) {} }
+
+dpad.addEventListener('pointerdown', e => {
+  e.preventDefault(); capture(dpad, e.pointerId);
+  dirId = e.pointerId; dpad.classList.add('on'); dpadSet(e); unlockAudio();
+});
+dpad.addEventListener('pointermove', e => {
+  if (e.pointerId !== dirId) return;
+  e.preventDefault(); dpadSet(e);
+});
+for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture'])
+  dpad.addEventListener(ev, e => { if (e.pointerId === dirId) dpadClear(); });
+
+function bindBtn(id, key) {
+  const el = document.getElementById(id);
+  let held = null;
+  el.addEventListener('pointerdown', e => {
+    e.preventDefault(); capture(el, e.pointerId);
+    held = e.pointerId; setKey(key, 1); el.classList.add('on'); unlockAudio();
+  });
+  const end = e => {
+    if (e.pointerId !== held) return;
+    held = null; setKey(key, 0); el.classList.remove('on');
+  };
+  for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture'])
+    el.addEventListener(ev, end);
+}
+bindBtn('bA', 'a'); bindBtn('bB', 'b');
+
+/* tap the game area to start / advance */
+cvs.addEventListener('pointerdown', e => { e.preventDefault(); setKey('start', 1); unlockAudio(); });
+for (const ev of ['pointerup', 'pointercancel'])
+  cvs.addEventListener(ev, () => { setKey('start', 0); });
+
+/* never leave a key held when the page loses focus — otherwise you come back
+   to a player sprinting into a pit on their own */
+function releaseAll() {
+  for (const k in Key) Key[k] = 0;
+  for (const k in edge) edge[k] = 0;
+  dpadClear();
+  for (const b of document.querySelectorAll('.btn.on')) b.classList.remove('on');
+}
+addEventListener('blur', releaseAll);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { releaseAll(); if (G.mode === 'play') G.mode = 'pause'; }
+  else requestWakeLock();
+});
+
+/* gamepad */
+function pollPad() {
+  const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (const g of gps) {
+    if (!g) continue;
+    const ax = g.axes[0] || 0, ay = g.axes[1] || 0;
+    if (ax < -.4 || g.buttons[14]?.pressed) setKey('l',1); else if (!kbd.l) setKey('l',0);
+    if (ax >  .4 || g.buttons[15]?.pressed) setKey('r',1); else if (!kbd.r) setKey('r',0);
+    if (ay >  .4 || g.buttons[13]?.pressed) setKey('d',1); else if (!kbd.d) setKey('d',0);
+    if (g.buttons[0]?.pressed) setKey('a',1); else if (!kbd.a) setKey('a',0);
+    if (g.buttons[2]?.pressed || g.buttons[1]?.pressed) setKey('b',1); else if (!kbd.b) setKey('b',0);
+    if (g.buttons[9]?.pressed) setKey('start',1); else if (!kbd.start) setKey('start',0);
+    return;
+  }
+}
+const kbd = {}; // mirrors physical keyboard so pads don't fight it
+addEventListener('keydown', e => { const k = MAP[e.code]; if (k) kbd[k==='s_d'?'d':k] = 1; });
+addEventListener('keyup',   e => { const k = MAP[e.code]; if (k) kbd[k==='s_d'?'d':k] = 0; });
+
+/* ============================ 5. TILES =================================== */
+const T_EMPTY = 0, T_SOLID = 1, T_PLAT = 2, T_SPIKE = 3, T_WATER = 4, T_GOAL = 5;
+
+const THEMES = [
+  { name:'JUNGLE',   sky:'#68b0f8', far:'#3878b8', gnd:'#48b048', gndD:'#2c7c2c', dirt:'#a07050', dirtD:'#6b4630' },
+  { name:'CAVERN',   sky:'#302848', far:'#181430', gnd:'#807060', gndD:'#504438', dirt:'#605040', dirtD:'#383028' },
+  { name:'GLACIER',  sky:'#a8d8f8', far:'#6098c8', gnd:'#d8f0ff', gndD:'#90b8d8', dirt:'#a0c0d8', dirtD:'#6888a0' },
+  { name:'NIGHTWOOD',sky:'#101838', far:'#202c50', gnd:'#286028', gndD:'#18401c', dirt:'#503828', dirtD:'#302018' },
+  { name:'HIGHLAND', sky:'#f0a860', far:'#b06838', gnd:'#a08050', gndD:'#705838', dirt:'#806040', dirtD:'#503828' },
+  { name:'DEEPCAVE', sky:'#281838', far:'#180c28', gnd:'#684878', gndD:'#402848', dirt:'#503058', dirtD:'#301838' },
+  { name:'VOLCANO',  sky:'#682018', far:'#381010', gnd:'#804038', gndD:'#502020', dirt:'#603028', dirtD:'#381818' },
+  { name:'SKYTEMPLE',sky:'#201040', far:'#100828', gnd:'#c0a050', gndD:'#806020', dirt:'#907830', dirtD:'#584818' }
+];
+
+/* ============================ 6. RNG ===================================== */
+function mulberry(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ============================ 7. STAGE GEN =============================== */
+/* Procedural, but seeded per (world,area) so a stage is always identical.
+   Difficulty ramps: more pits, tighter gaps, more enemies, faster hazards. */
+
+function genStage(world, area) {
+  const boss = (area === AREAS - 1);
+  const W = boss ? 150 : 210;
+  const rng = mulberry(world * 977 + area * 131 + 7);
+  const diff = world / (WORLDS - 1);           // 0..1
+  const grid = new Uint8Array(W * ROWS);
+  const at = (x, y) => x + y * W;
+  const set = (x, y, v) => { if (x >= 0 && x < W && y >= 0 && y < ROWS) grid[at(x, y)] = v; };
+
+  const GY = ROWS - 3;                          // main ground line
+  const ents = [];
+
+  // --- carve terrain ---
+  let x = 0;
+  const safeEnd = boss ? 34 : 14;               // flat run-up before goal / boss arena
+  while (x < W) {
+    /* A full screen (16 tiles) of guaranteed ground at the start: the player
+       spawns at rest and needs ~5 tiles just to reach top speed, so anything
+       shorter puts the first pit inside the acceleration run. */
+    if (x < 18 || x > W - safeEnd) {
+      for (let y = GY; y < ROWS; y++) set(x, y, T_SOLID);
+      x++; continue;
+    }
+    const roll = rng();
+    if (roll < .16 + diff * .12) {
+      /* ---- pit ----
+         MAX_PIT is bounded by the actual jump arc: a full-hold jump at top
+         speed covers ~7 tiles, so 5 is the widest gap that stays clearable
+         with margin. Anything wider gets a landing platform in the middle,
+         and every pit is followed by forced flat ground so two pits can
+         never chain into one impossible gap. */
+      const MAX_PIT = 5;
+      const wdt = Math.min(MAX_PIT, 2 + Math.floor(rng() * (2 + diff * 2.4)));
+      for (let i = 0; i < wdt; i++) {
+        set(x + i, ROWS - 1, T_WATER);
+        set(x + i, ROWS - 2, T_WATER);
+      }
+      if (wdt >= 4) {   // always, not sometimes — this is the fairness guarantee
+        const px = x + Math.floor(wdt / 2) - 1;
+        const ph = GY - 2 - Math.floor(rng() * 2);
+        for (let i = 0; i < 2; i++) set(px + i, ph, T_PLAT);
+      }
+      x += wdt;
+      // forced landing strip: guarantees a safe footing on the far side
+      const land = 3 + Math.floor(rng() * 3);
+      for (let i = 0; i < land; i++)
+        for (let y = GY; y < ROWS; y++) set(x + i, y, T_SOLID);
+      if (rng() < .4) ents.push({ t:'fruit', x:(x + 1) * TS, y:(GY - 1.8) * TS, k:Math.floor(rng()*3) });
+      x += land;
+    } else if (roll < .30 + diff * .10) {
+      // ---- raised block ----
+      const wdt = 2 + Math.floor(rng() * 3), hgt = 1 + Math.floor(rng() * 2);
+      for (let i = 0; i < wdt; i++) for (let y = GY - hgt; y < ROWS; y++) set(x + i, y, T_SOLID);
+      if (rng() < .3) ents.push({ t: 'fruit', x: (x + wdt / 2) * TS, y: (GY - hgt - 1.6) * TS, k: Math.floor(rng() * 3) });
+      x += wdt;
+    } else {
+      // ---- flat ground ----
+      const wdt = 3 + Math.floor(rng() * 6);
+      for (let i = 0; i < wdt; i++) for (let y = GY; y < ROWS; y++) set(x + i, y, T_SOLID);
+
+      // floating platform shelf
+      if (rng() < .34) {
+        const pw = 2 + Math.floor(rng() * 3), ph = GY - 3 - Math.floor(rng() * 2);
+        for (let i = 0; i < pw; i++) set(x + i + 1, ph, T_PLAT);
+        if (rng() < .5) ents.push({ t:'fruit', x:(x + 1 + pw/2)*TS, y:(ph-1.6)*TS, k:Math.floor(rng()*3) });
+      }
+      /* ground spikes: only on runs long enough to see them coming, and
+         never near the run's edges where a pit landing could drop you on one */
+      if (!boss && wdt >= 5 && rng() < .08 + diff * .10)
+        set(x + Math.floor(wdt / 2), GY - 1, T_SPIKE);
+
+      // --- enemies on this flat run ---
+      if (!boss && wdt >= 4) {
+        const n = rng() < .30 + diff * .40 ? 1 : 0;
+        for (let i = 0; i < n; i++) {
+          const ex = (x + 1 + rng() * (wdt - 2)) * TS;
+          const pick = rng();
+          let t;
+          if (pick < .30) t = 'snail';
+          else if (pick < .52) t = 'frog';
+          else if (pick < .70) t = 'crow';
+          else if (pick < .82) t = 'flame';
+          else if (pick < .92) t = 'snake';
+          else t = 'spider';
+          ents.push({ t, x: ex, y: (GY - 1) * TS, w: world });
+        }
+      }
+      // rolling boulder hazard, later worlds
+      if (!boss && world >= 2 && rng() < .07 + diff * .10)
+        ents.push({ t:'rock', x:(x + wdt) * TS, y:(GY - 1) * TS, w: world });
+
+      x += wdt;
+    }
+
+    // scattered fruit along the path
+    if (rng() < .30) ents.push({ t:'fruit', x:x*TS - 8, y:(GY - 1.8)*TS, k: Math.floor(rng()*3) });
+  }
+
+  // --- eggs: guaranteed power-up supply, 2-3 per stage ---
+  const eggCount = boss ? 2 : 3;
+  for (let i = 0; i < eggCount; i++) {
+    const ex = Math.floor((0.18 + 0.24 * i + rng() * .08) * (W - safeEnd - 12) + 10);
+    // find ground under ex
+    let gy = GY;
+    while (gy < ROWS && grid[at(ex, gy)] !== T_SOLID) gy++;
+    if (gy >= ROWS) continue;
+    ents.push({ t:'egg', x: ex * TS, y: (gy - 1) * TS, roll: rng() });
+  }
+
+  // --- goal / boss arena ---
+  if (boss) {
+    for (let i = 0; i < safeEnd; i++)
+      for (let y = GY; y < ROWS; y++) set(W - safeEnd + i, y, T_SOLID);
+    ents.push({ t:'boss', x: (W - 12) * TS, y: (GY - 7) * TS, w: world });
+  } else {
+    for (let y = GY - 4; y < GY; y++) set(W - 6, y, T_GOAL);
+  }
+
+  return { grid, W, H: ROWS, ents, boss, theme: THEMES[world % THEMES.length], GY };
+}
+
+/* ============================ 8. GAME STATE ============================== */
+const G = {
+  mode: 'title',          // title | play | dying | clear | gameover | win | pause
+  world: 0, area: 0,
+  lives: 3, score: 0, hi: 0, continues: 3,
+  stage: null, cam: 0, timer: 0, msg: '', msgT: 0,
+  shake: 0, flash: 0, tick: 0, grace: 0, page: 0, fromTitle: false
+};
+let seenHowto = false;
+try { seenHowto = localStorage.getItem('iq_howto') === '1'; } catch (e) {}
+try { G.hi = parseInt(localStorage.getItem('iq_hi') || '0', 10) || 0; } catch (e) {}
+
+/* vitality */
+const VIT_MAX = 100;
+const P = {
+  x:0, y:0, vx:0, vy:0, w:11, h:19,
+  face:1, ground:false, jump:false, jumpT:0, jumpBuf:0, coyote:0,
+  vit: VIT_MAX, axe:false, board:false, fairy:0,
+  inv:0, duck:false, anim:0, alive:true, dead:0, shots:0
+};
+
+let ents = [], shots = [], fx = [];
+
+/* ---------- physics constants ---------- */
+const GRAV = 0.42, MAXFALL = 7.2;
+const ACC = 0.55, FRIC = 0.72, MAXSPD = 2.35, BOARDSPD = 3.55;
+const JUMPV = -7.4, JUMPHOLD = 9;
+
+/* ============================ 9. HELPERS ================================= */
+function tileAt(px, py) {
+  const S = G.stage; if (!S) return T_SOLID;
+  const tx = Math.floor(px / TS), ty = Math.floor(py / TS);
+  if (tx < 0) return T_SOLID;
+  if (tx >= S.W) return T_EMPTY;
+  if (ty < 0) return T_EMPTY;
+  if (ty >= S.H) return T_EMPTY;
+  return S.grid[tx + ty * S.W];
+}
+const solidAt = (x, y) => { const t = tileAt(x, y); return t === T_SOLID; };
+const platAt  = (x, y) => tileAt(x, y) === T_PLAT;
+
+function boxHit(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+function say(t, dur) { G.msg = t; G.msgT = dur || 1.6; }
+function addScore(n) {
+  G.score += n;
+  if (G.score > G.hi) { G.hi = G.score; try { localStorage.setItem('iq_hi', String(G.hi)); } catch (e) {} }
+}
+function burst(x, y, col, n) {
+  for (let i = 0; i < (n || 8); i++)
+    fx.push({ x, y, vx:(Math.random()-.5)*3.2, vy:-Math.random()*3.2-.4, life:.55, col });
+}
+function popText(x, y, t) { fx.push({ x, y, txt:t, life:.9, vy:-1.1 }); }
+
+/* ============================ 10. STAGE LOAD ============================= */
+function loadStage() {
+  const S = genStage(G.world, G.area);
+  G.stage = S; G.cam = 0; G.timer = 0;
+  ents = []; shots = []; fx = [];
+
+  for (const e of S.ents) {
+    if (e.t === 'fruit') ents.push({ ...e, w:12, h:12, kind:'fruit', t:0, bob:Math.random()*6 });
+    else if (e.t === 'egg') ents.push({ ...e, w:16, h:16, kind:'egg', t:0, open:false, bob:0 });
+    else if (e.t === 'boss') ents.push(makeBoss(e));
+    else ents.push(makeEnemy(e));
+  }
+
+  // player spawn
+  P.x = 3 * TS; P.y = (S.GY - 2) * TS; P.vx = 0; P.vy = 0;
+  P.ground = false; P.alive = true; P.dead = 0; P.inv = 1.2;
+  P.vit = VIT_MAX; P.duck = false;
+  // power-ups do NOT survive death in this genre — reset on stage entry too
+  P.axe = false; P.board = false; P.fairy = 0;
+
+  Audio_.setTrack(G.world);
+  Audio_.bpm = S.boss ? 172 : 150;
+  G.grace = 2.0;                 // vitality holds while the stage title shows
+  say(`WORLD ${G.world + 1}-${G.area + 1}   ${S.theme.name}`, 2.0);
+}
+
+/* ============================ 11. ENEMIES ================================ */
+function makeEnemy(e) {
+  const w = e.w || 0, sp = 0.35 + w * 0.055;
+  const base = { x:e.x, y:e.y, vx:0, vy:0, kind:e.t, hp:1, anim:0, dead:0, face:-1, t:0 };
+  switch (e.t) {
+    case 'snail': return { ...base, w:16, h:14, vx:-sp*0.72, y:e.y-14+16, score:100 };
+    case 'frog':  return { ...base, w:12, h:10, y:e.y-10+16, hopT:rand(.4,1.1), score:150 };
+    case 'crow':  return { ...base, w:14, h:8,  y:e.y - 42 - Math.random()*24, vx:-sp*1.5,
+                           amp:10+Math.random()*14, base:0, score:200 };
+    case 'flame': return { ...base, w:5,  h:5,  y:e.y-5+16, fireT:rand(.3,1.2), score:0, immortal:true };
+    case 'snake': return { ...base, w:12, h:10, y:e.y-10+16, vx:-sp*0.9, score:250 };
+    case 'spider':return { ...base, w:12, h:8,  y:e.y - 70, top:e.y-70, dropT:rand(.2,1.4), score:200 };
+    case 'rock':  return { ...base, w:12, h:10, y:e.y-10+16, vx:-sp*2.6, score:0, immortal:true, roll:0 };
+  }
+  return { ...base, w:12, h:12, score:100 };
+}
+function rand(a, b) { return a + Math.random() * (b - a); }
+
+function makeBoss(e) {
+  const w = e.w;
+  return {
+    x:e.x, y:e.y, w:30, h:32, kind:'boss', boss:true,
+    hp: 5 + w * 2, maxhp: 5 + w * 2,
+    vy: 1.1 + w * .12, dir: 1, t: 0, fireT: 1.0,
+    hurt: 0, dead: 0, score: 2000 + w * 500, w_: w
+  };
+}
+
+/* ============================ 12. UPDATE: PLAYER ========================= */
+function updatePlayer(dt) {
+  if (!P.alive) {
+    P.dead += dt; P.vy += GRAV * 0.8; P.y += P.vy;
+    if (P.dead > 1.9) respawn();
+    return;
+  }
+
+  /* --- vitality drain: the core clock of the genre ---
+     It is the timer, not damage — it drains whether or not you move, and
+     fruit is what refills it. Rate is tuned against stage length: a 210-tile
+     stage takes ~24s at top speed, so draining empty in 22s (the old 4.4)
+     made a clean run impossible. ~33s in world 1 leaves room to breathe. */
+  if (G.grace > 0) G.grace -= dt;          // no drain while the stage title shows
+  else P.vit -= (3.0 + G.world * 0.25) * dt;
+  if (P.fairy > 0) P.fairy -= dt;
+  if (P.inv > 0) P.inv -= dt;
+  if (P.vit <= 0) { P.vit = 0; killPlayer(); return; }
+
+  /* --- horizontal --- */
+  const duckable = P.ground && !P.board;
+  P.duck = duckable && Key.d && !Key.l && !Key.r;
+
+  const maxs = P.board ? BOARDSPD : MAXSPD;
+  if (P.board) {
+    // skateboard: always rolling forward, steering only nudges
+    P.vx += P.face * ACC * 1.2;
+    if (Key.l) P.vx -= ACC * .35;
+    if (Key.r) P.vx += ACC * .35;
+  } else if (!P.duck) {
+    if (Key.l) { P.vx -= ACC; P.face = -1; }
+    else if (Key.r) { P.vx += ACC; P.face = 1; }
+    else if (P.ground) P.vx *= FRIC;
+  } else P.vx *= FRIC;
+
+  P.vx = Math.max(-maxs, Math.min(maxs, P.vx));
+  if (Math.abs(P.vx) < .06) P.vx = 0;
+
+  /* --- jump, with buffering + coyote time ---
+     Requiring P.ground at the exact frame of the press is what makes a jump
+     feel dead: press a few frames before you land, or a few frames after
+     stepping off a ledge, and nothing happened. Buffering remembers the press
+     briefly and fires it on landing; coyote time keeps the jump alive just
+     after leaving ground. Both are standard platformer practice. */
+  if (pressed('a')) P.jumpBuf = 0.13;
+  if (P.jumpBuf > 0) P.jumpBuf -= dt;
+  if (P.ground) P.coyote = 0.10; else if (P.coyote > 0) P.coyote -= dt;
+
+  if (P.jumpBuf > 0 && (P.ground || P.coyote > 0)) {
+    P.jumpBuf = 0; P.coyote = 0;
+    P.vy = JUMPV; P.ground = false; P.jump = true; P.jumpT = 0; Audio_.sfx('jump');
+  }
+  if (P.jump) {
+    P.jumpT += dt * 60;
+    if (Key.a && P.jumpT < JUMPHOLD) P.vy -= 0.30;   // variable height
+    else P.jump = false;
+  }
+  if (!Key.a) P.jump = false;
+
+  P.vy += GRAV;
+  if (P.vy > MAXFALL) P.vy = MAXFALL;
+
+  /* --- throw --- */
+  if (pressed('b') && P.axe && shots.length < 2) {
+    shots.push({ x: P.x + (P.face > 0 ? P.w : -6), y: P.y + 5,
+                 vx: P.face * 4.2, vy: -2.1, t: 0 });
+    Audio_.sfx('throw');
+  }
+
+  moveActor(P, true);
+
+  /* --- world bounds --- */
+  if (P.x < 0) { P.x = 0; P.vx = 0; }
+  const maxX = G.stage.W * TS - P.w;
+  if (P.x > maxX) { P.x = maxX; P.vx = 0; }
+  if (P.y > VH + 40) { killPlayer(); return; }
+
+  /* --- hazard tiles --- */
+  const cx = P.x + P.w / 2, cy = P.y + P.h / 2;
+  const tt = tileAt(cx, P.y + P.h - 2);
+  if (tt === T_SPIKE || tt === T_WATER) { killPlayer(); return; }
+
+  /* --- goal --- */
+  if (tileAt(cx, cy) === T_GOAL && G.mode === 'play') clearStage();
+
+  /* animation */
+  P.anim += Math.abs(P.vx) * dt * 7 + (P.board ? dt * 6 : 0);
+}
+
+function moveActor(o, isPlayer) {
+  /* X axis */
+  o.x += o.vx;
+  const x1 = o.x, x2 = o.x + o.w - 1;
+  const ys = [o.y + 2, o.y + o.h / 2, o.y + o.h - 2];
+  for (const y of ys) {
+    if (o.vx > 0 && solidAt(x2, y)) { o.x = Math.floor(x2 / TS) * TS - o.w - .01; o.vx = 0; if (isPlayer && P.board) bumpBoard(); }
+    if (o.vx < 0 && solidAt(x1, y)) { o.x = (Math.floor(x1 / TS) + 1) * TS + .01; o.vx = 0; if (isPlayer && P.board) bumpBoard(); }
+  }
+  /* Y axis */
+  o.y += o.vy;
+  const y1 = o.y, y2 = o.y + o.h - 1;
+  const xs = [o.x + 2, o.x + o.w / 2, o.x + o.w - 2];
+  o.ground = false;
+  for (const x of xs) {
+    if (o.vy >= 0) {
+      if (solidAt(x, y2) || (platAt(x, y2) && (y2 - o.vy) < Math.floor(y2 / TS) * TS)) {
+        o.y = Math.floor(y2 / TS) * TS - o.h; o.vy = 0; o.ground = true;
+      }
+    } else if (o.vy < 0 && solidAt(x, y1)) {
+      o.y = (Math.floor(y1 / TS) + 1) * TS + .01; o.vy = 0;
+    }
+  }
+  /* Settle. A resting actor sits a fraction above the tile it landed on, so
+     the feet test (y+h-1) lands in the empty row above and `ground` flickers
+     false on alternating frames — which makes jumping and ducking behave
+     erratically. Probe one pixel lower and snap flush. */
+  if (!o.ground && o.vy >= 0) {
+    const probe = o.y + o.h;
+    for (const x of xs) {
+      if (solidAt(x, probe) || platAt(x, probe)) {
+        o.ground = true; o.y = Math.floor(probe / TS) * TS - o.h; o.vy = 0; break;
+      }
+    }
+  }
+}
+function bumpBoard() { if (P.board) { P.board = false; Audio_.sfx('hurt'); burst(P.x+6,P.y+10,'#d0d0d0',10); P.inv = .9; } }
+
+function killPlayer() {
+  if (!P.alive) return;
+  P.alive = false; P.vy = -5.4; P.dead = 0;
+  Audio_.stop(); Audio_.sfx('die');
+  G.shake = .4;
+}
+function hurtPlayer() {
+  if (P.inv > 0 || P.fairy > 0 || !P.alive) return;
+  if (P.board) { bumpBoard(); return; }
+  if (P.axe)   { P.axe = false; P.inv = 1.0; Audio_.sfx('hurt'); burst(P.x+6,P.y+8,'#e0e0e0',8); return; }
+  killPlayer();
+}
+
+function respawn() {
+  G.lives--;
+  if (G.lives < 0) {
+    if (G.continues > 0) { G.mode = 'gameover'; G.timer = 0; }
+    else { G.mode = 'gameover'; G.timer = 0; }
+    return;
+  }
+  loadStage();
+  G.mode = 'play';
+}
+
+/* ============================ 13. UPDATE: ENTITIES ======================= */
+function updateEnts(dt) {
+  const S = G.stage;
+  const viewL = G.cam - 48, viewR = G.cam + VW + 64;
+
+  for (let i = ents.length - 1; i >= 0; i--) {
+    const e = ents[i];
+    e.t = (e.t || 0) + dt;
+
+    /* cull offscreen-behind */
+    if (e.x < G.cam - 120 && !e.boss) { ents.splice(i, 1); continue; }
+    /* sleep until nearly onscreen */
+    if (e.x > viewR && !e.boss) continue;
+
+    if (e.dead > 0) {
+      e.dead += dt; e.y -= 40 * dt;
+      if (e.dead > .5) ents.splice(i, 1);
+      continue;
+    }
+
+    switch (e.kind) {
+      case 'fruit': case 'egg': updatePickup(e, dt); break;
+      case 'boss':  updateBoss(e, dt); break;
+      default:      updateEnemy(e, dt); break;
+    }
+
+    /* collide with player (projectiles are resolved in updateShots) */
+    if (P.alive && !e.dead && !e.proj &&
+        e.kind !== 'fruit' && e.kind !== 'egg' &&
+        !(e.boss && !e.started) && boxHit(P, e)) {
+      hurtPlayer();
+    }
+  }
+}
+
+function updatePickup(e, dt) {
+  e.bob = (e.bob || 0) + dt * 4;
+  if (!P.alive) return;
+  if (!boxHit(P, e)) return;
+
+  if (e.kind === 'fruit') {
+    const gain = [14, 22, 30][e.k || 0];
+    P.vit = Math.min(VIT_MAX, P.vit + gain);
+    addScore(100 + (e.k || 0) * 50);
+    popText(e.x, e.y, '+' + gain);
+    burst(e.x + 6, e.y + 6, '#f0d030', 5);
+    Audio_.sfx('pick');
+    e.dead = 0.001;
+  } else if (e.kind === 'egg' && !e.open) {
+    e.open = true; e.dead = 0.001;
+    Audio_.sfx('egg');
+    burst(e.x + 8, e.y + 8, '#ffffff', 12);
+    const r = e.roll;
+    if (r < .34)      { P.axe = true;  say('HATCHET!'); popText(e.x, e.y-8, 'AXE'); }
+    else if (r < .56) { P.board = true; P.face = 1; say('SKATEBOARD!'); Audio_.sfx('board'); }
+    else if (r < .72) { P.fairy = 8;   say('FAIRY! INVINCIBLE'); }
+    else if (r < .90) { P.vit = VIT_MAX; say('MILK! FULL VITALITY'); }
+    else              { G.lives++; say('1-UP!'); Audio_.sfx('1up'); }
+  }
+}
+
+function updateEnemy(e, dt) {
+  const S = G.stage;
+  switch (e.kind) {
+    case 'snail':
+      e.x += e.vx;
+      if (!solidAt(e.x + (e.vx < 0 ? 0 : e.w), e.y + e.h + 2) || solidAt(e.x + (e.vx<0?-1:e.w+1), e.y + e.h/2))
+        e.vx = -e.vx;
+      e.anim += dt * 4;
+      break;
+
+    case 'frog':
+      e.vy += GRAV * .8; e.y += e.vy; e.x += e.vx;
+      if (solidAt(e.x + e.w/2, e.y + e.h)) {
+        e.y = Math.floor((e.y + e.h) / TS) * TS - e.h; e.vy = 0; e.vx = 0;
+        e.hopT -= dt;
+        if (e.hopT <= 0) {
+          e.hopT = rand(.7, 1.5);
+          e.vy = -3.4 - Math.random() * 1.2;
+          e.vx = (P.x < e.x ? -1 : 1) * (0.7 + Math.random() * .5);
+        }
+      }
+      break;
+
+    case 'crow':
+      e.x += e.vx;
+      e.base = e.base || e.y;
+      e.y = e.base + Math.sin(e.t * 3.4) * e.amp;
+      e.anim += dt * 8;
+      break;
+
+    case 'snake':
+      e.x += e.vx;
+      if (!solidAt(e.x + (e.vx < 0 ? 0 : e.w), e.y + e.h + 2)) e.vx = -e.vx;
+      e.anim += dt * 5;
+      break;
+
+    case 'flame':
+      if (e.yBase === undefined) e.yBase = e.y;
+      e.fireT -= dt;
+      if (e.fireT <= 0 && e.y >= e.yBase) { e.fireT = rand(1.1, 2.2); e.vy = -4.2; }
+      e.vy += GRAV * .55; e.y += e.vy;
+      if (e.y > e.yBase) { e.y = e.yBase; e.vy = 0; }
+      e.anim += dt * 12;
+      break;
+
+    case 'spider':
+      e.dropT -= dt;
+      if (e.dropT > 0) { e.y += Math.sin(e.t * 2) * .2; break; }
+      // drop when player is near horizontally
+      if (Math.abs((P.x + P.w/2) - (e.x + e.w/2)) < 70) e.y += 2.4;
+      else e.y = Math.max(e.top, e.y - 1.2);
+      if (solidAt(e.x + e.w/2, e.y + e.h)) e.y -= 1.6;
+      break;
+
+    case 'rock':
+      e.x += e.vx; e.roll += dt * 9;
+      e.vy += GRAV; e.y += e.vy;
+      if (solidAt(e.x + e.w/2, e.y + e.h)) {
+        e.y = Math.floor((e.y + e.h) / TS) * TS - e.h; e.vy = 0;
+      }
+      break;
+  }
+}
+
+function updateBoss(b, dt) {
+  if (!b.started) {
+    if (P.x > b.x - VW * .78) { b.started = true; Audio_.sfx('boss'); say('!! GUARDIAN !!', 1.4); G.shake = .5; }
+    else return;
+  }
+  b.t += dt;
+  if (b.hurt > 0) b.hurt -= dt;
+
+  /* bob vertically between ceiling and ground */
+  b.y += b.vy * b.dir;
+  const top = (G.stage.GY - 9) * TS, bot = (G.stage.GY - 3) * TS;
+  if (b.y < top) { b.y = top; b.dir = 1; }
+  if (b.y > bot) { b.y = bot; b.dir = -1; }
+
+  /* fire projectiles — pattern escalates with world number */
+  b.fireT -= dt;
+  if (b.fireT <= 0) {
+    b.fireT = Math.max(.45, 1.35 - b.w_ * .10);
+    const n = 1 + Math.floor(b.w_ / 3);
+    for (let i = 0; i < n; i++) {
+      const spread = (i - (n - 1) / 2) * .30;
+      ents.push({
+        x: b.x, y: b.y + 14, w: 6, h: 6, kind: 'bshot',
+        vx: -2.3 - b.w_ * .12, vy: spread * 2.2, t: 0, proj: true
+      });
+    }
+  }
+}
+
+function updateShots(dt) {
+  for (let i = shots.length - 1; i >= 0; i--) {
+    const s = shots[i];
+    s.t += dt;
+    s.vy += GRAV * .55;
+    s.x += s.vx; s.y += s.vy;
+    if (s.x < G.cam - 20 || s.x > G.cam + VW + 20 || s.y > VH + 30 || solidAt(s.x, s.y)) {
+      shots.splice(i, 1); continue;
+    }
+    const sb = { x: s.x, y: s.y, w: 6, h: 6 };
+    for (const e of ents) {
+      if (e.dead || e.kind === 'fruit' || e.kind === 'egg' || e.immortal || e.proj) continue;
+      if (!boxHit(sb, e)) continue;
+      if (e.boss) {
+        e.hp--; e.hurt = .18; Audio_.sfx('bhit');
+        burst(s.x, s.y, '#ffffff', 5);
+        if (e.hp <= 0) { defeatBoss(e); }
+      } else {
+        e.dead = 0.001; addScore(e.score || 100);
+        popText(e.x, e.y, String(e.score || 100));
+        burst(e.x + e.w/2, e.y + e.h/2, '#f0d030', 8);
+        Audio_.sfx('kill');
+      }
+      shots.splice(i, 1);
+      break;
+    }
+  }
+
+  /* boss projectiles live in ents; move + hit player */
+  for (let i = ents.length - 1; i >= 0; i--) {
+    const e = ents[i];
+    if (!e.proj) continue;
+    e.x += e.vx; e.y += e.vy; e.t += dt;
+    if (e.x < G.cam - 30 || solidAt(e.x, e.y)) { ents.splice(i, 1); continue; }
+    if (P.alive && boxHit(P, e)) { hurtPlayer(); ents.splice(i, 1); }
+  }
+}
+
+function defeatBoss(b) {
+  b.dead = 0.001;
+  addScore(b.score);
+  G.shake = .7; G.flash = .35;
+  Audio_.sfx('clear');
+  for (let i = 0; i < 26; i++) burst(b.x + 15, b.y + 16, ['#f0d030','#e03030','#ffffff'][i%3], 3);
+  setTimeout(clearStage, 700);
+}
+
+/* ============================ 14. FX ===================================== */
+function updateFx(dt) {
+  for (let i = fx.length - 1; i >= 0; i--) {
+    const f = fx[i];
+    f.life -= dt;
+    if (f.life <= 0) { fx.splice(i, 1); continue; }
+    if (f.txt) { f.y += f.vy; f.vy *= .94; }
+    else { f.vy += GRAV * .5; f.x += f.vx; f.y += f.vy; }
+  }
+}
+
+/* ============================ 15. STAGE FLOW ============================= */
+function clearStage() {
+  if (G.mode !== 'play') return;
+  G.mode = 'clear'; G.timer = 0;
+  Audio_.stop(); Audio_.sfx('clear');
+  addScore(500 + Math.floor(P.vit) * 10);
+}
+function advance() {
+  G.area++;
+  if (G.area >= AREAS) { G.area = 0; G.world++; }
+  if (G.world >= WORLDS) { G.mode = 'win'; G.timer = 0; Audio_.stop(); return; }
+  loadStage(); G.mode = 'play';
+}
+function startGame() {
+  G.world = 0; G.area = 0; G.lives = 3; G.score = 0; G.continues = 3;
+  loadStage(); G.mode = 'play';
+  Audio_.sfx('start');
+}
+
+/* ============================ 16. RENDER ================================= */
+function drawSpr(s, x, y, flip) {
+  ctx.drawImage(flip ? s.f : s.c, Math.round(x), Math.round(y));
+}
+
+function drawBg(S) {
+  const th = S.theme;
+  ctx.fillStyle = th.sky; ctx.fillRect(0, 0, VW, VH);
+
+  /* parallax hills */
+  ctx.fillStyle = th.far;
+  const off = -(G.cam * .32) % 96;
+  for (let i = -1; i < VW / 96 + 2; i++) {
+    const bx = i * 96 + off;
+    ctx.beginPath();
+    ctx.moveTo(bx, VH);
+    ctx.lineTo(bx + 20, VH - 52);
+    ctx.lineTo(bx + 48, VH - 74);
+    ctx.lineTo(bx + 76, VH - 48);
+    ctx.lineTo(bx + 96, VH);
+    ctx.closePath(); ctx.fill();
+  }
+  /* mid-layer trees / pillars */
+  ctx.fillStyle = th.gndD; ctx.globalAlpha = .45;
+  const off2 = -(G.cam * .58) % 64;
+  for (let i = -1; i < VW / 64 + 2; i++) {
+    const bx = i * 64 + off2;
+    ctx.fillRect(bx + 26, VH - 96, 8, 64);
+    ctx.beginPath(); ctx.arc(bx + 30, VH - 100, 18, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawTiles(S) {
+  const th = S.theme;
+  const x0 = Math.max(0, Math.floor(G.cam / TS) - 1);
+  const x1 = Math.min(S.W - 1, Math.ceil((G.cam + VW) / TS) + 1);
+  for (let tx = x0; tx <= x1; tx++) {
+    for (let ty = 0; ty < S.H; ty++) {
+      const t = S.grid[tx + ty * S.W];
+      if (!t) continue;
+      const px = tx * TS - G.cam, py = ty * TS;
+      if (t === T_SOLID) {
+        const surface = (ty === 0 || S.grid[tx + (ty-1)*S.W] !== T_SOLID);
+        ctx.fillStyle = surface ? th.gnd : th.dirt;
+        ctx.fillRect(px, py, TS, TS);
+        ctx.fillStyle = surface ? th.gndD : th.dirtD;
+        ctx.fillRect(px, py + TS - 3, TS, 3);
+        ctx.fillRect(px + TS - 2, py, 2, TS);
+        if (!surface && ((tx + ty) & 1)) { ctx.fillRect(px + 4, py + 5, 3, 3); }
+      } else if (t === T_PLAT) {
+        ctx.fillStyle = th.gnd;  ctx.fillRect(px, py, TS, 6);
+        ctx.fillStyle = th.gndD; ctx.fillRect(px, py + 5, TS, 2);
+      } else if (t === T_SPIKE) {
+        ctx.fillStyle = '#d8d8e8';
+        for (let i = 0; i < 4; i++) {
+          ctx.beginPath();
+          ctx.moveTo(px + i*4, py + TS); ctx.lineTo(px + i*4 + 2, py + 5); ctx.lineTo(px + i*4 + 4, py + TS);
+          ctx.closePath(); ctx.fill();
+        }
+      } else if (t === T_WATER) {
+        ctx.fillStyle = '#2050c0'; ctx.fillRect(px, py, TS, TS);
+        ctx.fillStyle = '#4080f0';
+        ctx.fillRect(px, py + (Math.sin(G.tick*3 + tx) > 0 ? 1 : 3), TS, 2);
+      } else if (t === T_GOAL) {
+        ctx.fillStyle = '#f0d030'; ctx.fillRect(px + 6, py, 4, TS);
+        if (ty === S.GY - 4) {
+          ctx.fillStyle = '#e03030';
+          ctx.beginPath(); ctx.moveTo(px+10,py+1); ctx.lineTo(px+22,py+6); ctx.lineTo(px+10,py+11);
+          ctx.closePath(); ctx.fill();
+        }
+      }
+    }
+  }
+}
+
+function drawEnt(e) {
+  const x = e.x - G.cam, y = e.y;
+  if (x < -40 || x > VW + 40) return;
+
+  if (e.dead > 0) { ctx.globalAlpha = Math.max(0, 1 - e.dead * 2.5); }
+
+  switch (e.kind) {
+    case 'fruit': {
+      const s = [SPR.fruitA, SPR.fruitB, SPR.fruitC][e.k || 0];
+      drawSpr(s, x + 3, y + Math.sin(e.bob) * 1.6);
+      break;
+    }
+    case 'egg': drawSpr(SPR.egg, x + 4, y + 8 + Math.sin(e.bob) * .8); break;
+    case 'snail':  drawSpr(SPR.snail, x, y); break;
+    case 'frog':   drawSpr(e.vy !== 0 ? SPR.frog1 : SPR.frog0, x, y); break;
+    case 'crow':   drawSpr((Math.floor(e.anim) & 1) ? SPR.crow1 : SPR.crow0, x, y, e.vx > 0); break;
+    case 'snake':  drawSpr(SPR.snake, x, y, e.vx > 0); break;
+    case 'spider': {
+      ctx.strokeStyle = '#d0d0d0'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x + 6, e.top - 40); ctx.lineTo(x + 6, y); ctx.stroke();
+      drawSpr(SPR.spider, x, y); break;
+    }
+    case 'flame':  drawSpr((Math.floor(e.anim) & 1) ? SPR.flame1 : SPR.flame0, x, y); break;
+    case 'rock': {
+      ctx.save(); ctx.translate(x + 6, y + 5); ctx.rotate(e.roll);
+      ctx.drawImage(SPR.rock.c, -6, -5); ctx.restore(); break;
+    }
+    case 'bshot': {
+      ctx.fillStyle = (Math.floor(G.tick * 20) & 1) ? '#f0d030' : '#e03030';
+      ctx.beginPath(); ctx.arc(x + 3, y + 3, 3.4, 0, 7); ctx.fill();
+      break;
+    }
+    case 'boss': {
+      if (!e.started) { ctx.globalAlpha = 1; break; }
+      ctx.save();
+      if (e.hurt > 0 && (Math.floor(G.tick * 40) & 1)) ctx.globalAlpha = .45;
+      drawSpr(SPR.boss, x, y);
+      ctx.restore();
+      /* hp bar */
+      const bw = 54, bx = VW / 2 - bw / 2;
+      ctx.fillStyle = '#000'; ctx.fillRect(bx - 1, 25, bw + 2, 6);
+      ctx.fillStyle = '#e03030';
+      ctx.fillRect(bx, 26, Math.max(0, bw * (e.hp / e.maxhp)), 4);
+      break;
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawPlayer() {
+  if (!P.alive) { drawSpr(SPR.hurt, P.x - G.cam, P.y, P.face < 0); return; }
+  if (P.inv > 0 && (Math.floor(G.tick * 24) & 1)) return;     // i-frame flicker
+
+  const x = P.x - G.cam - 1, y = P.y;
+
+  if (P.fairy > 0) {
+    ctx.save();
+    ctx.globalAlpha = .45 + Math.sin(G.tick * 12) * .2;
+    ctx.fillStyle = '#60d0d0';
+    ctx.beginPath(); ctx.arc(x + 6, y + 10, 15, 0, 7); ctx.fill();
+    ctx.restore();
+  }
+
+  let s;
+  if (P.duck) s = SPR.duck;
+  else if (!P.ground) s = SPR.jump;
+  else if (Math.abs(P.vx) > .2) s = (Math.floor(P.anim) & 1) ? SPR.run1 : SPR.run0;
+  else s = SPR.stand;
+
+  if (P.board) drawSpr(SPR.board, x, y + P.h - 2, P.face < 0);
+  drawSpr(s, x, y + (P.board ? -2 : 0), P.face < 0);
+
+  if (P.axe) {
+    ctx.fillStyle = '#e0e0e0';
+    ctx.fillRect(x + (P.face > 0 ? 11 : -1), y + 7, 2, 2);
+  }
+}
+
+function drawShots() {
+  for (const s of shots) {
+    ctx.save();
+    ctx.translate(s.x - G.cam + 3, s.y + 3);
+    ctx.rotate(s.t * 18);
+    ctx.drawImage(SPR.axe.c, -3, -3);
+    ctx.restore();
+  }
+}
+
+function drawFx() {
+  for (const f of fx) {
+    if (f.txt) {
+      ctx.globalAlpha = Math.min(1, f.life * 1.6);
+      ctx.fillStyle = '#fff'; ctx.font = '7px monospace'; ctx.textAlign = 'center';
+      ctx.fillText(f.txt, f.x - G.cam + 6, f.y);
+    } else {
+      ctx.globalAlpha = Math.min(1, f.life * 2);
+      ctx.fillStyle = f.col;
+      ctx.fillRect(Math.round(f.x - G.cam), Math.round(f.y), 2, 2);
+    }
+  }
+  ctx.globalAlpha = 1; ctx.textAlign = 'left';
+}
+
+/* ---- text helper ---- */
+function text(t, x, y, col, size, align) {
+  ctx.font = (size || 8) + 'px ui-monospace,monospace';
+  ctx.textAlign = align || 'left';
+  ctx.fillStyle = '#000';
+  ctx.fillText(t, x + 1, y + 1);
+  ctx.fillStyle = col || '#fff';
+  ctx.fillText(t, x, y);
+  ctx.textAlign = 'left';
+}
+
+function drawHUD() {
+  /* top bar */
+  ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(0, 0, VW, 22);
+
+  text('SCORE ' + String(G.score).padStart(6, '0'), 4, 9, '#fff', 8);
+  text('HI ' + String(G.hi).padStart(6, '0'), 4, 19, '#f0d030', 8);
+  text(`W${G.world + 1}-${G.area + 1}`, VW - 4, 9, '#fff', 8, 'right');
+
+  /* lives */
+  for (let i = 0; i < Math.min(G.lives, 5); i++) {
+    ctx.drawImage(SPR.life.c, VW - 12 - i * 10, 12);
+  }
+  if (G.lives > 5) text('x' + G.lives, VW - 60, 19, '#fff', 8);
+
+  /* vitality bar */
+  const bw = 96, bx = VW / 2 - bw / 2, by = 6;
+  ctx.fillStyle = '#000'; ctx.fillRect(bx - 1, by - 1, bw + 2, 8);
+  ctx.fillStyle = '#301010'; ctx.fillRect(bx, by, bw, 6);
+  const frac = P.vit / VIT_MAX;
+  const low = frac < .25;
+  ctx.fillStyle = low ? ((Math.floor(G.tick * 10) & 1) ? '#f04030' : '#f0a030') : '#48d048';
+  ctx.fillRect(bx, by, bw * frac, 6);
+  text('VITALITY', bx + bw / 2, by + 15, low ? '#f04030' : '#c0c0c0', 7, 'center');
+
+  /* power-up chips */
+  let px = 4;
+  if (P.axe)     { text('AXE',   px, 32, '#e0e0e0', 7); px += 26; }
+  if (P.board)   { text('BOARD', px, 32, '#60d0d0', 7); px += 34; }
+  if (P.fairy>0) { text('FAIRY ' + Math.ceil(P.fairy), px, 32, '#f070d0', 7); }
+
+  /* centre message */
+  if (G.msgT > 0) {
+    ctx.globalAlpha = Math.min(1, G.msgT * 2);
+    text(G.msg, VW / 2, VH / 2 - 34, '#fff', 10, 'center');
+    ctx.globalAlpha = 1;
+  }
+}
+
+/* ---- screens ---- */
+function drawTitle() {
+  const SEA = 146, ISLE = 158;
+  ctx.fillStyle = '#0a1830'; ctx.fillRect(0, 0, VW, VH);
+
+  /* sun, low enough to sit clear of the title text */
+  ctx.fillStyle = '#b8683a'; ctx.beginPath(); ctx.arc(VW/2, 108, 30, 0, 7); ctx.fill();
+  ctx.fillStyle = '#f0a860'; ctx.beginPath(); ctx.arc(VW/2, 108, 25, 0, 7); ctx.fill();
+
+  /* sea */
+  ctx.fillStyle = '#204090'; ctx.fillRect(0, SEA, VW, VH - SEA);
+  for (let i = 0; i < 14; i++) {
+    ctx.fillStyle = i % 2 ? '#2a58b0' : '#3068d0';
+    ctx.fillRect(0, SEA + 4 + i * 6 + Math.sin(G.tick * 2 + i) * 1.4, VW, 2);
+  }
+
+  /* island + palm */
+  ctx.fillStyle = '#48b048';
+  ctx.beginPath(); ctx.ellipse(VW/2, ISLE, 66, 14, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#2c7c2c';
+  ctx.beginPath(); ctx.ellipse(VW/2, ISLE + 5, 66, 9, 0, 0, 7); ctx.fill();
+  ctx.fillRect(VW/2 + 22, 124, 5, 32);
+  ctx.beginPath(); ctx.arc(VW/2 + 24, 122, 15, 0, 7); ctx.fill();
+  ctx.fillStyle = '#48b048';
+  ctx.beginPath(); ctx.arc(VW/2 + 20, 118, 10, 0, 7); ctx.fill();
+
+  /* hero standing ON the island */
+  drawSpr(SPR.stand, VW/2 - 34, ISLE - 21 + Math.sin(G.tick * 3) * 1.5);
+
+  text('ISLAND  QUEST', VW/2, 52, '#f0d030', 18, 'center');
+  text('an 8-bit jungle run', VW/2, 68, '#90c0f0', 8, 'center');
+
+  if ((Math.floor(G.tick * 1.6) & 1))
+    text(isTouch ? 'TAP  THE  SCREEN  TO  START'
+                 : 'PRESS  ENTER  TO  START', VW/2, 190, '#fff', 9, 'center');
+  text(isTouch ? 'FIRE  =  HOW  TO  PLAY' : 'X  =  HOW  TO  PLAY',
+       VW/2, 202, '#60d0d0', 7, 'center');
+
+  if (isTouch) {
+    text('PAD  MOVE + DUCK      JUMP / FIRE  BUTTONS', VW/2, 211, '#a0b0c8', 7, 'center');
+    text('TAP  THE  GAME  AREA  TO  PAUSE', VW/2, 221, '#a0b0c8', 7, 'center');
+  } else {
+    text('ARROWS / WASD  MOVE    Z or SPACE  JUMP', VW/2, 211, '#a0b0c8', 7, 'center');
+    text('X  THROW     DOWN  DUCK     ENTER  PAUSE', VW/2, 221, '#a0b0c8', 7, 'center');
+  }
+  text('HI ' + String(G.hi).padStart(6,'0'), VW/2, 234, '#f0d030', 8, 'center');
+}
+
+/* ---- how to play: device-aware, and it explains the vitality clock, which
+       reads as a bug until someone tells you it is the timer ---- */
+function drawHowTo() {
+  ctx.fillStyle = '#0d1424'; ctx.fillRect(0, 0, VW, VH);
+  ctx.fillStyle = '#16203a'; ctx.fillRect(0, 0, VW, 26);
+  text('HOW TO PLAY', 8, 17, '#f0d030', 12);
+  text((G.page + 1) + '/2', VW - 8, 17, '#7e8aa4', 8, 'right');
+
+  if (G.page === 0) {
+    text('CONTROLS', 8, 44, '#60d0d0', 9);
+    const rows = isTouch ? [
+      ['PAD  left / right', 'run'],
+      ['PAD  down',         'duck'],
+      ['JUMP button',       'jump - hold for higher'],
+      ['FIRE button',       'throw hatchet'],
+      ['tap the game',      'pause']
+    ] : [
+      ['ARROWS  or  WASD', 'run'],
+      ['DOWN',             'duck'],
+      ['SPACE  or  Z',     'jump - hold for higher'],
+      ['X  or  J',         'throw hatchet'],
+      ['ENTER',            'pause'],
+      ['M',                'music on / off']
+    ];
+    let y = 62;
+    for (const [k, v] of rows) {
+      text(k, 14, y, '#ffffff', 8);
+      text(v, 120, y, '#a0b0c8', 8);
+      y += 15;
+    }
+    text(isTouch ? 'You can slide your thumb across the'
+                 : 'Hold the jump key longer to clear',
+         14, y + 12, '#7e8aa4', 7);
+    text(isTouch ? 'pad without lifting it.'
+                 : 'the wider pits.',
+         14, y + 22, '#7e8aa4', 7);
+
+  } else {
+    text('VITALITY  IS  YOUR  TIMER', 8, 44, '#60d0d0', 9);
+    /* a live sample bar so the thing being explained is on screen */
+    const bw = 120, bx = 14;
+    ctx.fillStyle = '#000'; ctx.fillRect(bx - 1, 51, bw + 2, 8);
+    ctx.fillStyle = '#301010'; ctx.fillRect(bx, 52, bw, 6);
+    const f = 0.35 + Math.sin(G.tick * 1.5) * 0.3;
+    ctx.fillStyle = f < .3 ? '#f04030' : '#48d048';
+    ctx.fillRect(bx, 52, bw * f, 6);
+
+    text('It drains on its own, always -', 14, 72, '#ffffff', 8);
+    text('even standing still. That is the', 14, 83, '#ffffff', 8);
+    text('game clock, not damage.', 14, 94, '#ffffff', 8);
+
+    text('EAT FRUIT TO REFILL IT', 8, 116, '#60d0d0', 9);
+    drawSpr(SPR.fruitA, 16, 124); text('+14', 28, 134, '#a0b0c8', 8);
+    drawSpr(SPR.fruitB, 62, 124); text('+22', 74, 134, '#a0b0c8', 8);
+    drawSpr(SPR.fruitC, 108, 124); text('+30', 120, 134, '#a0b0c8', 8);
+    drawSpr(SPR.milk,  154, 124); text('full', 166, 134, '#a0b0c8', 8);
+
+    text('BREAK EGGS FOR POWER-UPS', 8, 158, '#60d0d0', 9);
+    drawSpr(SPR.egg, 16, 164);
+    text('hatchet / skateboard / fairy', 32, 172, '#a0b0c8', 8);
+    text('milk / extra life', 32, 183, '#a0b0c8', 8);
+
+    text('One hit kills unless you hold a', 14, 202, '#f0a860', 8);
+    text('power-up. Reach the flag to win.', 14, 213, '#f0a860', 8);
+  }
+
+  if ((Math.floor(G.tick * 1.6) & 1))
+    text(isTouch ? 'TAP  TO  CONTINUE' : 'PRESS  ENTER  TO  CONTINUE',
+         VW / 2, 233, '#ffffff', 8, 'center');
+}
+
+function drawClear() {
+  drawWorld();
+  ctx.fillStyle = 'rgba(0,0,0,.66)'; ctx.fillRect(0, 0, VW, VH);
+  text('AREA CLEAR!', VW/2, 96, '#f0d030', 16, 'center');
+  text(`WORLD ${G.world+1} - ${G.area+1}`, VW/2, 116, '#fff', 9, 'center');
+  text('VITALITY BONUS  ' + Math.floor(P.vit) * 10, VW/2, 134, '#48d048', 9, 'center');
+  text('SCORE  ' + String(G.score).padStart(6,'0'), VW/2, 150, '#fff', 9, 'center');
+  if (G.timer > 1.4 && (Math.floor(G.tick*2)&1))
+    text('PRESS  JUMP  TO  CONTINUE', VW/2, 180, '#fff', 8, 'center');
+}
+
+function drawGameOver() {
+  ctx.fillStyle = '#100810'; ctx.fillRect(0, 0, VW, VH);
+  text('GAME OVER', VW/2, 90, '#e03030', 20, 'center');
+  text('SCORE  ' + String(G.score).padStart(6,'0'), VW/2, 118, '#fff', 10, 'center');
+  text('HI     ' + String(G.hi).padStart(6,'0'), VW/2, 134, '#f0d030', 10, 'center');
+  text(`REACHED  WORLD ${G.world+1} - ${G.area+1}`, VW/2, 154, '#a0a0b0', 8, 'center');
+  if ((Math.floor(G.tick*1.6)&1))
+    text('PRESS  ENTER  TO  RETRY', VW/2, 186, '#fff', 9, 'center');
+}
+
+function drawWin() {
+  ctx.fillStyle = '#081828'; ctx.fillRect(0, 0, VW, VH);
+  for (let i = 0; i < 40; i++) {
+    const t = G.tick * 40 + i * 97;
+    ctx.fillStyle = ['#f0d030','#e03030','#60d0d0','#48d048'][i % 4];
+    ctx.fillRect((i * 37 + t * .6) % VW, (i * 53 + t * 1.4) % VH, 2, 3);
+  }
+  text('YOU ESCAPED', VW/2, 74, '#f0d030', 18, 'center');
+  text('THE  ISLAND!', VW/2, 96, '#f0d030', 18, 'center');
+  text('ALL 8 WORLDS CLEARED', VW/2, 124, '#fff', 9, 'center');
+  text('FINAL SCORE  ' + String(G.score).padStart(6,'0'), VW/2, 146, '#48d048', 10, 'center');
+  drawSpr(SPR.stand, VW/2 - 6, 164 + Math.sin(G.tick*4)*3);
+  if ((Math.floor(G.tick*1.6)&1))
+    text('PRESS  ENTER', VW/2, 206, '#fff', 9, 'center');
+}
+
+function drawPause() {
+  drawWorld(); drawHUD();
+  ctx.fillStyle = 'rgba(0,0,0,.7)'; ctx.fillRect(0, 0, VW, VH);
+  text('PAUSED', VW/2, 108, '#fff', 16, 'center');
+  text('ENTER  RESUME', VW/2, 134, '#a0a0b0', 8, 'center');
+  text('M  MUSIC ' + (Audio_.musicOn ? 'ON' : 'OFF'), VW/2, 148, '#a0a0b0', 8, 'center');
+}
+
+function drawWorld() {
+  const S = G.stage; if (!S) return;
+  ctx.save();
+  if (G.shake > 0) ctx.translate((Math.random()-.5)*G.shake*9, (Math.random()-.5)*G.shake*9);
+  drawBg(S);
+  drawTiles(S);
+  for (const e of ents) drawEnt(e);
+  drawShots();
+  drawPlayer();
+  drawFx();
+  ctx.restore();
+  if (G.flash > 0) {
+    ctx.fillStyle = `rgba(255,255,255,${G.flash})`;
+    ctx.fillRect(0, 0, VW, VH);
+  }
+}
+
+/* ============================ 17. MAIN LOOP ============================== */
+let last = performance.now(), acc = 0;
+const STEP = 1 / 60;
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  let dt = (now - last) / 1000; last = now;
+  if (dt > .25) dt = .25;
+  acc += dt;
+
+  while (acc >= STEP) { step(STEP); acc -= STEP; }
+  render();
+}
+
+function step(dt) {
+  G.tick += dt;
+  pollPad();
+  Audio_.update(dt);
+
+  if (G.msgT > 0) G.msgT -= dt;
+  if (G.shake > 0) G.shake -= dt;
+  if (G.flash > 0) G.flash -= dt * 1.6;
+
+  switch (G.mode) {
+    case 'title':
+      if (pressed('b')) { G.mode = 'howto'; G.page = 0; G.fromTitle = true; break; }
+      if (pressed('start') || pressed('a')) {
+        Audio_.init(); Audio_.resume();
+        if (!seenHowto) {                       // show it once, unprompted
+          seenHowto = true;
+          try { localStorage.setItem('iq_howto', '1'); } catch (e) {}
+          G.mode = 'howto'; G.page = 0; G.fromTitle = false;
+        } else startGame();
+      }
+      break;
+
+    case 'howto':
+      if (pressed('start') || pressed('a') || pressed('b')) {
+        G.page++;
+        if (G.page > 1) {
+          if (G.fromTitle) G.mode = 'title';
+          else startGame();
+        }
+      }
+      break;
+
+    case 'play':
+      if (pressed('start')) { G.mode = 'pause'; break; }
+      G.timer += dt;
+      updatePlayer(dt);
+      updateEnts(dt);
+      updateShots(dt);
+      updateFx(dt);
+      /* camera: lead the player, never scroll back past boss arena */
+      {
+        const target = P.x - VW * .38;
+        const maxCam = G.stage.W * TS - VW;
+        G.cam += (Math.max(0, Math.min(maxCam, target)) - G.cam) * .12;
+        if (G.cam < 0) G.cam = 0;
+      }
+      break;
+
+    case 'pause':
+      if (pressed('start')) G.mode = 'play';
+      break;
+
+    case 'clear':
+      G.timer += dt;
+      updateFx(dt);
+      if (G.timer > 1.4 && (pressed('a') || pressed('start'))) advance();
+      break;
+
+    case 'gameover':
+      G.timer += dt;
+      if (G.timer > .8 && (pressed('start') || pressed('a'))) { G.mode = 'title'; Audio_.stop(); }
+      break;
+
+    case 'win':
+      G.timer += dt;
+      if (G.timer > 1.2 && (pressed('start') || pressed('a'))) { G.mode = 'title'; Audio_.stop(); }
+      break;
+  }
+  latch();
+}
+
+function render() {
+  switch (G.mode) {
+    case 'title':    drawTitle(); break;
+    case 'howto':    drawHowTo(); break;
+    case 'play':     drawWorld(); drawHUD(); break;
+    case 'pause':    drawPause(); break;
+    case 'clear':    drawClear(); break;
+    case 'gameover': drawGameOver(); break;
+    case 'win':      drawWin(); break;
+  }
+}
+
+/* music toggle */
+addEventListener('keydown', e => {
+  if (e.code === 'KeyM') {
+    Audio_.musicOn = !Audio_.musicOn;
+    say('MUSIC ' + (Audio_.musicOn ? 'ON' : 'OFF'), 1.0);
+  }
+});
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
