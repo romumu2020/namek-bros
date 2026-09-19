@@ -307,7 +307,7 @@ const Audio_ = {
     if (!AC) return;
     this.ac = new AC();
     this.master = this.ac.createGain();
-    this.master.gain.value = 0.22;
+    this.master.gain.value = 0.30;
     this.master.connect(this.ac.destination);
   },
   resume() { if (this.ac && this.ac.state === 'suspended') this.ac.resume(); },
@@ -408,22 +408,31 @@ const Audio_ = {
     const sixteenth = 60 / this.bpm / 4;
     this.stepT = sixteenth;
 
+    /* Everything here must live where a laptop or phone speaker can actually
+       reproduce it. A 64Hz kick and a 55Hz bass measured as 86% of the tonal
+       energy sitting below 200Hz — i.e. inaudible on anything without a
+       woofer, which is why the music went silent. The kick is now a fast
+       pitch drop starting at 190Hz (the attack is what reads as a kick on a
+       small speaker, not the fundamental) and the bass sits an octave up. */
     const i = this.step % 16;
     const d = this.drums[i];
-    if (d === 'K')      this.tone(64, .13, 'sine', .30, 34);   // kick
-    else if (d === 'S') this.noise(.06, .085);                  // clap
-    else if (d === 'h') this.noise(.018, .03);                  // hat
+    /* Percussion is deliberately quiet relative to the melody. Broadband
+       noise six times a bar psychoacoustically masks a square wave on small
+       speakers — loud hats are why the tune stopped cutting through. */
+    if (d === 'K') { this.tone(190, .10, 'square', .22, 58); this.noise(.02, .035); }
+    else if (d === 'S') this.noise(.05, .055);                  // clap
+    else if (d === 'h') this.noise(.014, .016);                 // hat
 
     /* the bass lands off the downbeat too — most of the afro feel is here */
     if (i === 0 || i === 6 || i === 10) {
       const b = this.bassLine[Math.floor(this.step / 16) % this.bassLine.length];
-      this.tone(55 * Math.pow(2, b / 12), sixteenth * 3, 'triangle', .11);
+      this.tone(110 * Math.pow(2, b / 12), sixteenth * 3, 'triangle', .11);
     }
 
     if (this.melWait <= 0) {
       const [semi, steps] = this.track[this.melI % this.track.length];
       if (semi !== null)
-        this.tone(220 * Math.pow(2, semi / 12), sixteenth * steps * .9, 'square', .075);
+        this.tone(220 * Math.pow(2, semi / 12), sixteenth * steps * .9, 'square', .15);
       this.melWait = steps;
       this.melI++;
     }
