@@ -648,15 +648,31 @@ function genStage(world, area) {
     if (rng() < .30) ents.push({ t:'fruit', x:x*TS - 8, y:(GY - 1.8)*TS, k: Math.floor(rng()*3) });
   }
 
-  // --- eggs: guaranteed power-up supply, 2-3 per stage ---
-  const eggCount = boss ? 2 : 3;
+  /* --- eggs: the power-up supply ---
+     Two rules here are load-bearing, both added after W1-4 turned out to be
+     literally unwinnable:
+     1. The boss only takes damage from thrown hatchets, so a boss stage
+        MUST contain an axe egg. It used to be a dice roll and 3 of the 8
+        boss stages came up with no axe at all.
+     2. The placement loop used to `continue` when it found no ground under
+        its chosen column, silently dropping that egg — which is how boss
+        stages meant to hold 2 eggs ended up holding 1. Now it walks left
+        looking for a valid column instead of giving up. */
+  const eggCount = boss ? 3 : 3;
+  let placed = 0;
   for (let i = 0; i < eggCount; i++) {
-    const ex = Math.floor((0.18 + 0.24 * i + rng() * .08) * (W - safeEnd - 12) + 10);
-    // find ground under ex
-    let gy = GY;
-    while (gy < ROWS && grid[at(ex, gy)] !== T_SOLID) gy++;
+    let ex = Math.floor((0.18 + 0.24 * i + rng() * .08) * (W - safeEnd - 12) + 10);
+    let gy = ROWS;
+    for (let tries = 0; tries < 24 && ex > 10; tries++, ex--) {
+      let g = GY;
+      while (g < ROWS && grid[at(ex, g)] !== T_SOLID) g++;
+      if (g < ROWS) { gy = g; break; }
+    }
     if (gy >= ROWS) continue;
-    ents.push({ t:'egg', x: ex * TS, y: (gy - 1) * TS, roll: rng() });
+    // first egg on a boss stage always yields the hatchet (roll < .34)
+    const roll = (boss && placed === 0) ? rng() * 0.33 : rng();
+    ents.push({ t:'egg', x: ex * TS, y: (gy - 1) * TS, roll });
+    placed++;
   }
 
   // --- goal / boss arena ---
@@ -1129,7 +1145,10 @@ function defeatBoss(b) {
   G.shake = .7; G.flash = .35;
   Audio_.sfx('clear');
   for (let i = 0; i < 26; i++) burst(b.x + 15, b.y + 16, ['#f0d030','#e03030','#ffffff'][i%3], 3);
-  setTimeout(clearStage, 700);
+  /* Pin the stage this kill belongs to: a stale timer must not clear a
+     different stage if the level changes before it fires. */
+  const _w = G.world, _a = G.area;
+  setTimeout(() => { if (G.world === _w && G.area === _a) clearStage(); }, 700);
 }
 
 /* ============================ 14. FX ===================================== */
