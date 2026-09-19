@@ -583,11 +583,41 @@ const WEAPON_KEYS = ['M','S','L','F'];
 const G = {
   mode:'title', stage:0, players:1, msg:'', msgT:0, tick:0, timer:0,
   cam:0, camY:0, shake:0, flash:0, page:0, fromTitle:false,
-  hi:0, level:null, depth:0, bossOn:false, bossKilled:false, waveT:1.2
+  hi:0, level:null, depth:0, bossOn:false, bossKilled:false, waveT:1.2,
+  diff:1, menu:0, selStage:0, continues:3
 };
 try { G.hi = parseInt(localStorage.getItem('sj_hi')||'0',10)||0; } catch(e){}
+try { G.diff = parseInt(localStorage.getItem('sj_diff')||'1',10); } catch(e){}
+if(!(G.diff>=0&&G.diff<=2)) G.diff=1;
 let seenHow = false;
 try { seenHow = localStorage.getItem('sj_how')==='1'; } catch(e){}
+
+/* Difficulty scales lives and how hard things shoot back — never the layout,
+   so a stage is the same stage on every setting. */
+const DIFFS = [
+  { name:'EASY',   lives:5, fire:1.35, wave:1.5, bossHp:0.75 },
+  { name:'NORMAL', lives:3, fire:1.00, wave:1.0, bossHp:1.00 },
+  { name:'HARD',   lives:2, fire:0.70, wave:0.7, bossHp:1.30 }
+];
+let maxStage = 0;
+try { maxStage = parseInt(localStorage.getItem('sj_max')||'0',10)||0; } catch(e){}
+function saveProgress(){
+  try { localStorage.setItem('sj_max',String(maxStage));
+        localStorage.setItem('sj_diff',String(G.diff)); } catch(e){}
+}
+
+/* Eight distinct bosses. Previously all eight were the same core sprite with
+   more hit points, so every fight played identically. */
+const BOSSES = [
+  { name:'GATE CORE',  col:'#e04030', dark:'#902018', shape:'gate',  pattern:'spread' },
+  { name:'WALL GUN',   col:'#8a8a96', dark:'#4a4a56', shape:'wall',  pattern:'twin'   },
+  { name:'ROTOR',      col:'#60d0e0', dark:'#2090b0', shape:'rotor', pattern:'radial' },
+  { name:'HIVE',       col:'#b060d0', dark:'#703090', shape:'hive',  pattern:'spawn'  },
+  { name:'PISTON',     col:'#f0d030', dark:'#b08000', shape:'gate',  pattern:'slam'   },
+  { name:'PRISM',      col:'#48b048', dark:'#2c7c2c', shape:'rotor', pattern:'sweep'  },
+  { name:'CLAW',       col:'#f08830', dark:'#a85010', shape:'wall',  pattern:'pincer' },
+  { name:'OVERMIND',   col:'#ff5050', dark:'#8a1020', shape:'hive',  pattern:'final'  }
+];
 
 const GRAV=0.44, MAXFALL=7.4, RUN=1.9, JUMPV=-7.0;
 
@@ -926,7 +956,7 @@ function spawnWave(dt) {
   if (L.type !== 'side' || G.bossOn) return;
   G.waveT -= dt;
   if (G.waveT > 0) return;
-  G.waveT = Math.max(0.34, 0.92 - G.stage*0.07);   // relentless, like the original
+  G.waveT = Math.max(0.34, 0.92 - G.stage*0.07) * DIFFS[G.diff].wave;
   const live = foes.filter(f => !f.dead).length;
   if (live > 15) return;
   const px = G.cam + VW + 10;
@@ -1039,56 +1069,116 @@ function spawnBoss() {
   const L = G.level;
   G.bossOn = true;
   Audio_.sfx('boss'); G.shake = .55;
-  G.msg = '!! CORE !!'; G.msgT = 1.6;
-  if (L.type === 'corridor') {
-    boss = { x:VW/2-20, y:70, w:40, h:32, hp:26+G.stage*4, maxhp:26+G.stage*4,
-             t:0, fireT:.8, hurt:0, kind:'core', dead:0 };
-  } else if (L.type === 'climb') {
-    boss = { x:VW/2-20, y:40, w:40, h:32, hp:22+G.stage*4, maxhp:22+G.stage*4,
-             t:0, fireT:.9, hurt:0, kind:'core', dead:0, dir:1 };
-  } else {
-    boss = { x:L.bossX, y:L.bossY, w:40, h:32, hp:24+G.stage*5, maxhp:24+G.stage*5,
-             t:0, fireT:.9, hurt:0, kind:'gate', dead:0, dir:1,
-             turrets:[{dy:-26,hp:4,dead:0},{dy:26,hp:4,dead:0}] };
-  }
+  const def = BOSSES[G.stage % BOSSES.length];
+  G.msg = '!! ' + def.name + ' !!'; G.msgT = 1.8;
+  const D = DIFFS[G.diff];
+  const hp = Math.max(6, Math.round((24 + G.stage*5) * D.bossHp));
+  const base = { w:40, h:32, hp, maxhp:hp, t:0, fireT:.9, hurt:0, dead:0,
+                 def, pattern:def.pattern, dir:1, phase:0, drones:0 };
+  if (L.type === 'corridor')   boss = { ...base, x:VW/2-20, y:70,  kind:'core', homeX:VW/2-20, homeY:70 };
+  else if (L.type === 'climb') boss = { ...base, x:VW/2-20, y:40,  kind:'core', homeX:VW/2-20, homeY:40 };
+  else                         boss = { ...base, x:L.bossX, y:L.bossY, kind:'gate', homeX:L.bossX, homeY:L.bossY };
 }
+
 function updateBoss(dt) {
   const b = boss; if (!b) return;
   b.t += dt; if (b.hurt > 0) b.hurt -= dt;
-  const L = G.level;
+  const fs = DIFFS[G.diff].fire;
+  const tgt = nearestPlayer(b.x, b.y);
+  const shootAt = (spd, spreadN, spreadStep) => {
+    if (!tgt) return;
+    const a0 = Math.atan2(tgt.y - (b.y+16), tgt.x - (b.x+20));
+    const n = spreadN || 1;
+    for (let i = 0; i < n; i++) {
+      const a = a0 + (i - (n-1)/2) * (spreadStep || 0.28);
+      ebullets.push({ x:b.x+20, y:b.y+16, vx:Math.cos(a)*spd, vy:Math.sin(a)*spd, w:6,h:6,t:0 });
+    }
+  };
 
-  if (b.kind === 'gate') {
-    b.y += Math.sin(b.t*1.3)*0.7;
-    b.fireT -= dt;
-    if (b.fireT <= 0) {
-      b.fireT = Math.max(.42, 1.15 - G.stage*.07);
-      const tgt = nearestPlayer(b.x, b.y);
-      if (tgt) {
-        const n = 2 + Math.floor(G.stage/3);
-        const a0 = Math.atan2(tgt.y - (b.y+16), tgt.x - b.x);
-        for (let i=0;i<n;i++) {
-          const a = a0 + (i-(n-1)/2)*0.30;
-          ebullets.push({ x:b.x, y:b.y+16, vx:Math.cos(a)*2.4, vy:Math.sin(a)*2.4, w:6,h:6,t:0 });
-        }
+  switch (b.pattern) {
+    case 'spread':                       // S1 — aimed fan, drifts
+      b.y = b.homeY + Math.sin(b.t*1.3)*18;
+      b.fireT -= dt;
+      if (b.fireT <= 0) { b.fireT = 1.15*fs; shootAt(2.4, 3); }
+      break;
+
+    case 'twin':                         // S2 — two tight streams
+      b.y = b.homeY + Math.sin(b.t*1.9)*26;
+      b.fireT -= dt;
+      if (b.fireT <= 0) { b.fireT = .75*fs; shootAt(2.7, 2, .5); }
+      break;
+
+    case 'radial':                       // S3 — rotating full-circle volley
+      b.x = b.homeX + Math.sin(b.t*1.1)*26;
+      b.fireT -= dt;
+      if (b.fireT <= 0) {
+        b.fireT = 1.0*fs;
+        const n = 8;
+        for (let i=0;i<n;i++){ const a=(i/n)*Math.PI*2 + b.t*1.3;
+          ebullets.push({x:b.x+20,y:b.y+16,vx:Math.cos(a)*1.9,vy:Math.sin(a)*1.9,w:6,h:6,t:0}); }
       }
-      for (const tu of b.turrets) {
-        if (tu.dead) continue;
-        const tg = nearestPlayer(b.x, b.y+16+tu.dy);
-        if (tg) eshoot(b.x+4, b.y+16+tu.dy, tg.x+5, tg.y+8, 2.2);
+      break;
+
+    case 'spawn':                        // S4 — sends drones at you
+      b.y = b.homeY + Math.sin(b.t*0.9)*14;
+      b.fireT -= dt;
+      if (b.fireT <= 0) {
+        b.fireT = 1.6*fs;
+        if (foes.filter(f=>!f.dead).length < 10) {
+          const f = mkFoe('drone', b.x, b.y+10);
+          f.baseY = b.y+10; f.vx = -1.3; foes.push(f);
+        } else shootAt(2.3, 2);
       }
+      break;
+
+    case 'slam':                         // S5 — rises and slams down
+      b.phase += dt;
+      if (b.phase < 1.5) b.y += (b.homeY - 26 - b.y)*0.06;
+      else if (b.phase < 2.1) b.y += 7;
+      else { b.phase = 0; G.shake = .4; shootAt(2.2, 5, .34); }
+      break;
+
+    case 'sweep': {                      // S6 — sweeping beam of shots
+      b.x = b.homeX + Math.sin(b.t*0.7)*34;
+      b.fireT -= dt;
+      if (b.fireT <= 0) {
+        b.fireT = .30*fs;
+        const a = Math.PI*0.5 + Math.sin(b.t*1.25)*0.85;
+        ebullets.push({x:b.x+20,y:b.y+16,vx:Math.cos(a)*2.6,vy:Math.sin(a)*2.6,w:6,h:6,t:0});
+      }
+      break;
     }
-  } else {
-    /* corridor / climb core: drifts and fires radial volleys */
-    b.x += Math.sin(b.t*1.1)*1.3;
-    b.fireT -= dt;
-    if (b.fireT <= 0) {
-      b.fireT = Math.max(.45, 1.1 - G.stage*.06);
-      const n = 6 + Math.floor(G.stage/2);
-      for (let i=0;i<n;i++) {
-        const a = (i/n)*Math.PI*2 + b.t;
-        ebullets.push({ x:b.x+20, y:b.y+16, vx:Math.cos(a)*1.9, vy:Math.sin(a)*1.9, w:6,h:6,t:0 });
+
+    case 'pincer':                       // S7 — closes in, then retreats
+      b.phase += dt;
+      if (b.phase < 2.6) { b.x -= 0.7; }
+      else if (b.phase < 4.0) { b.x += 1.3; }
+      else b.phase = 0;
+      if (b.x < b.homeX - 90) b.x = b.homeX - 90;
+      if (b.x > b.homeX) b.x = b.homeX;
+      b.fireT -= dt;
+      if (b.fireT <= 0) { b.fireT = .95*fs; shootAt(2.5, 3, .22); }
+      break;
+
+    case 'final':                        // S8 — cycles radial / drones / fan
+      b.phase += dt;
+      b.y = b.homeY + Math.sin(b.t*1.4)*16;
+      b.fireT -= dt;
+      if (b.fireT <= 0) {
+        const stage = Math.floor(b.phase / 3) % 3;
+        if (stage === 0) {
+          b.fireT = .85*fs;
+          const n = 10;
+          for (let i=0;i<n;i++){ const a=(i/n)*Math.PI*2 + b.t;
+            ebullets.push({x:b.x+20,y:b.y+16,vx:Math.cos(a)*2.1,vy:Math.sin(a)*2.1,w:6,h:6,t:0}); }
+        } else if (stage === 1) {
+          b.fireT = 1.2*fs;
+          if (foes.filter(f=>!f.dead).length < 12) {
+            const f = mkFoe('drone', b.x, b.y+10); f.baseY=b.y+10; f.vx=-1.5; foes.push(f);
+          }
+        } else { b.fireT = .6*fs; shootAt(2.8, 4, .3); }
       }
-    }
+      break;
   }
 
   for (const pl of P) {
@@ -1096,6 +1186,7 @@ function updateBoss(dt) {
     if (hit(hurtBox(pl), b)) killPlayer(pl);
   }
 }
+
 function bossDown() {
   G.bossKilled = true; G.shake = .8; G.flash = .4;
   for (let i=0;i<30;i++) burst(boss.x+20, boss.y+16, ['#f0d030','#e04030','#ffffff'][i%3], 3);
@@ -1275,16 +1366,34 @@ function step(dt) {
   if (G.flash > 0) G.flash -= dt*1.6;
 
   switch (G.mode) {
-    case 'title':
+    case 'title': {
       if (pressed(0,'b')) { G.mode='howto'; G.page=0; G.fromTitle=true; break; }
-      if (pressed(0,'u') || pressed(0,'d')) { G.players = G.players===1?2:1; Audio_.sfx('hit'); }
+      const hasStage = maxStage > 0;
+      const nItems = hasStage ? 4 : 3;
+      if (pressed(0,'u')) { G.menu = (G.menu-1+nItems)%nItems; Audio_.sfx('hit'); }
+      if (pressed(0,'d')) { G.menu = (G.menu+1)%nItems; Audio_.sfx('hit'); }
+      const idxStage = hasStage ? 1 : -1;
+      const idxPlay  = hasStage ? 2 : 1;
+      const idxDiff  = hasStage ? 3 : 2;
+      /* capture both edges once — pressed() consumes them */
+      const gl = pressed(0,'l'), gr = pressed(0,'r');
+      const bump = (dir) => {
+        if (G.menu === idxStage) G.selStage = (G.selStage + dir + maxStage+1) % (maxStage+1);
+        else if (G.menu === idxPlay) G.players = G.players===1?2:1;
+        else if (G.menu === idxDiff) { G.diff = (G.diff + dir + 3) % 3; saveProgress(); }
+        else return false;
+        Audio_.sfx('hit'); return true;
+      };
+      if (gl || gr) bump(gr ? 1 : -1);
       if (sysPressed('start') || pressed(0,'a')) {
         Audio_.init(); Audio_.resume();
+        if (G.menu !== 0) { bump(1); break; }
         if (!seenHow) { seenHow=true; try{localStorage.setItem('sj_how','1');}catch(e){}
                         G.mode='howto'; G.page=0; G.fromTitle=false; }
         else startRun();
       }
       break;
+    }
 
     case 'howto':
       if (sysPressed('start') || pressed(0,'a') || pressed(0,'b')) {
@@ -1337,6 +1446,12 @@ function step(dt) {
 
     case 'gameover':
       G.timer += dt;
+      if (G.continues > 0 && G.timer > .6 && pressed(0,'a')) {
+        G.continues--;
+        for (const pl of P) if (pl.active) { pl.lives = DIFFS[G.diff].lives; pl.alive = true; }
+        boss = null; loadStage(); G.mode = 'play'; Audio_.sfx('clear');
+        break;
+      }
       if (G.timer > .9 && (sysPressed('start') || pressed(0,'a'))) { G.mode='title'; Audio_.stop(); }
       break;
 
@@ -1352,13 +1467,15 @@ function startRun() {
   P = [mkPlayer(0), mkPlayer(1)];
   P[0].active = true;
   P[1].active = G.players === 2;
-  const lives = konamiOn ? 30 : 3;
+  const lives = konamiOn ? 30 : DIFFS[G.diff].lives;
   for (const pl of P) pl.lives = lives;
-  G.stage = 0; boss = null;
+  G.stage = G.selStage || 0; boss = null;
+  G.continues = 3;
   loadStage(); G.mode = 'play';
 }
 function nextStage() {
   G.stage++;
+  if (G.stage > maxStage && G.stage < NSTAGES) { maxStage = G.stage; saveProgress(); }
   if (G.stage >= NSTAGES) { G.mode='win'; G.timer=0; Audio_.stop(); return; }
   boss = null; loadStage(); G.mode='play';
 }
@@ -1515,6 +1632,53 @@ function drawCorridorBg(L) {
   }
 }
 
+/* Four machine silhouettes, recoloured per boss, rather than one shared
+   core sprite — cheap way to make eight fights look like eight fights. */
+function drawBossArt(b, x, y) {
+  const d = b.def, W = 40, H = 32, cx = x + W/2, cy = y + H/2;
+  const pulse = 0.5 + Math.sin(b.t*4)*0.5;
+
+  if (d.shape === 'gate') {
+    ctx.fillStyle = d.dark; ctx.fillRect(x, y, W, H);
+    ctx.fillStyle = d.col;  ctx.fillRect(x+3, y+3, W-6, H-6);
+    ctx.fillStyle = d.dark; ctx.fillRect(x+7, y+7, W-14, H-14);
+    ctx.fillStyle = `rgba(255,240,140,${0.35+pulse*0.6})`;
+    ctx.beginPath(); ctx.arc(cx, cy, 7+pulse*2, 0, 7); ctx.fill();
+    ctx.fillStyle = d.dark;
+    for (let i=0;i<4;i++){ ctx.fillRect(x+4+i*9, y-3, 5, 5); ctx.fillRect(x+4+i*9, y+H-2, 5, 5); }
+
+  } else if (d.shape === 'wall') {
+    ctx.fillStyle = d.dark; ctx.fillRect(x, y+2, W, H-4);
+    ctx.fillStyle = d.col;
+    for (let i=0;i<3;i++) ctx.fillRect(x+2, y+4+i*9, W-4, 6);
+    ctx.fillStyle = '#2a2a32';
+    for (let i=0;i<2;i++) ctx.fillRect(x-4, y+8+i*12, 8, 6);   // barrels
+    ctx.fillStyle = `rgba(255,120,80,${0.3+pulse*0.7})`;
+    ctx.fillRect(x+W/2-4, cy-3, 8, 6);
+
+  } else if (d.shape === 'rotor') {
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(b.t*1.6);
+    ctx.fillStyle = d.dark;
+    for (let i=0;i<3;i++){ ctx.rotate(Math.PI*2/3); ctx.fillRect(-3, 0, 6, 19); }
+    ctx.restore();
+    ctx.fillStyle = d.col;  ctx.beginPath(); ctx.arc(cx, cy, 12, 0, 7); ctx.fill();
+    ctx.fillStyle = d.dark; ctx.beginPath(); ctx.arc(cx, cy, 7, 0, 7); ctx.fill();
+    ctx.fillStyle = `rgba(255,255,255,${0.35+pulse*0.6})`;
+    ctx.beginPath(); ctx.arc(cx, cy, 3.5+pulse*1.5, 0, 7); ctx.fill();
+
+  } else {                                   // hive
+    ctx.fillStyle = d.dark;
+    ctx.beginPath(); ctx.ellipse(cx, cy, W/2, H/2, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = d.col;
+    for (let i=0;i<6;i++){
+      const a = (i/6)*Math.PI*2 + b.t*0.4;
+      ctx.beginPath(); ctx.arc(cx+Math.cos(a)*11, cy+Math.sin(a)*8, 4.5, 0, 7); ctx.fill();
+    }
+    ctx.fillStyle = `rgba(255,220,120,${0.35+pulse*0.6})`;
+    ctx.beginPath(); ctx.arc(cx, cy, 6+pulse*2, 0, 7); ctx.fill();
+  }
+}
+
 function drawPlayer(pl, camX, camY) {
   if (!pl.active) return;
   const x = pl.x - camX, y = pl.y - camY;
@@ -1569,11 +1733,12 @@ function drawWorld() {
     const bx = boss.x - camX, by = boss.y - camY;
     ctx.save();
     if (boss.hurt > 0 && (Math.floor(G.tick*40)&1)) ctx.globalAlpha = .5;
-    dspr(SPR.core, bx, by);
+    drawBossArt(boss, bx, by);
     ctx.restore();
     const bw = 70, bxx = VW/2 - bw/2;
     ctx.fillStyle='#000'; ctx.fillRect(bxx-1, 27, bw+2, 6);
     ctx.fillStyle='#e04030'; ctx.fillRect(bxx, 28, Math.max(0, bw*(boss.hp/boss.maxhp)), 4);
+    text(boss.def.name, VW/2, 44, boss.def.col, 7, 'center');
   }
 
   for (const b of bullets) {
@@ -1642,14 +1807,26 @@ function drawTitle() {
   dspr(SPR.stand, VW/2-30, 146);
   dspr(SPR.sold0, VW/2+22, 148);
 
-  const sel = c => (Math.floor(G.tick*3)&1) ? c : '#ffffff';
-  text((G.players===1?'> ':'  ')+'1 PLAYER', VW/2-44, 190, G.players===1?sel('#f0d030'):'#7e8aa4', 9);
-  text((G.players===2?'> ':'  ')+'2 PLAYERS', VW/2-44, 202, G.players===2?sel('#f0d030'):'#7e8aa4', 9);
-  text(isTouch?'PAD UP/DOWN TO CHANGE':'UP/DOWN TO CHANGE', VW/2, 214, '#4e5a70', 7, 'center');
+  const items = [
+    { label:'START',      val:'' },
+    { label:'PLAYERS',    val:G.players===1?'1':'2' },
+    { label:'DIFFICULTY', val:DIFFS[G.diff].name }
+  ];
+  if (maxStage > 0) items.splice(1, 0, { label:'STAGE', val:'STAGE '+(G.selStage+1) });
+  G.menu = ((G.menu % items.length) + items.length) % items.length;
 
-  if ((Math.floor(G.tick*1.6)&1))
-    text(isTouch?'TAP TO START':'PRESS ENTER TO START', VW/2, 228, '#fff', 8, 'center');
-  text(isTouch?'FIRE = HOW TO PLAY':'X = HOW TO PLAY', VW/2, 238, '#60d0e0', 7, 'center');
+  let my = 176;
+  for (let i=0;i<items.length;i++){
+    const on = i===G.menu, blink = on && (Math.floor(G.tick*3)&1);
+    text((on?'> ':'  ')+items[i].label, VW/2-58, my,
+         on?(blink?'#ffffff':'#f0d030'):'#7e8aa4', 9);
+    if (items[i].val)
+      text(items[i].val, VW/2+58, my, on?'#60d0e0':'#5a6478', 9, 'right');
+    my += 12;
+  }
+  text(isTouch?'PAD UP/DOWN  •  JUMP TO PICK':'UP/DOWN  •  ENTER TO PICK',
+       VW/2, my+5, '#4e5a70', 7, 'center');
+  text(isTouch?'FIRE = HOW TO PLAY':'X = HOW TO PLAY', VW/2, my+15, '#60d0e0', 7, 'center');
 }
 
 function drawHowTo() {
@@ -1722,7 +1899,15 @@ function drawGameOver() {
   text('1P  ' + String(P[0].score).padStart(6,'0'), VW/2, 122, '#fff', 10, 'center');
   if (P[1].active) text('2P  ' + String(P[1].score).padStart(6,'0'), VW/2, 138, '#20d060', 10, 'center');
   text('REACHED STAGE ' + (G.stage+1) + ' - ' + STAGES[G.stage].name, VW/2, 158, '#a0a0b0', 8, 'center');
-  if ((Math.floor(G.tick*1.6)&1)) text(isTouch?'TAP TO RETRY':'PRESS ENTER', VW/2, 190, '#fff', 9, 'center');
+  if (G.continues > 0) {
+    if ((Math.floor(G.tick*2)&1))
+      text((isTouch?'JUMP':'PRESS Z / SPACE') + '  TO  CONTINUE', VW/2, 182, '#48b048', 9, 'center');
+    text('CONTINUES LEFT  ' + G.continues, VW/2, 196, '#a0a0b0', 8, 'center');
+    text('you restart at STAGE ' + (G.stage+1), VW/2, 208, '#7e8aa4', 7, 'center');
+    text(isTouch?'TAP FOR TITLE':'ENTER FOR TITLE', VW/2, 220, '#7e8aa4', 7, 'center');
+  } else if ((Math.floor(G.tick*1.6)&1)) {
+    text(isTouch?'TAP TO RETRY':'PRESS ENTER', VW/2, 190, '#fff', 9, 'center');
+  }
 }
 function drawWin() {
   ctx.fillStyle='#08141c'; ctx.fillRect(0,0,VW,VH);
