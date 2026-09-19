@@ -407,9 +407,20 @@ async function requestWakeLock() {
      2. a looping near-silent <audio> element      (older iOS)
      3. a silent buffer started inside the gesture (classic unlock) */
 let _iosAudioDone = false;
+/* Apple only. The looping element and session juggling exist purely to get
+   around Safari's ambient category; running them on a desktop browser that
+   never had the problem is pure risk, so they are gated off there. */
+const IS_APPLE = (() => {
+  const ua = navigator.userAgent || '';
+  const iOS = /iP(hone|ad|od)/.test(ua) ||
+              (/Mac/.test(ua) && typeof document !== 'undefined' && 'ontouchend' in document);
+  const safari = /^((?!chrome|chromium|android|crios|fxios).)*safari/i.test(ua);
+  return iOS || safari;
+})();
 function iosUnlock() {
   if (_iosAudioDone) return;
   _iosAudioDone = true;
+  if (!IS_APPLE) return;                 // desktop Chrome/Firefox: nothing to do
   try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
   try {
     const a = document.createElement('audio');
