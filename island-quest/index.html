@@ -11,9 +11,9 @@
     -webkit-user-select:none;user-select:none;
     -webkit-tap-highlight-color:transparent;
     /* `none` alone does NOT stop iOS Safari's double-tap zoom; `manipulation` does */
-    touch-action:manipulation;overscroll-behavior:none}
+    touch-action:none;overscroll-behavior:none}
 
-  #wrap{position:fixed;inset:0;display:flex;flex-direction:column;
+  #wrap{position:fixed;inset:0;touch-action:none;display:flex;flex-direction:column;
     align-items:center;justify-content:center;
     padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px)
             env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}
@@ -23,7 +23,7 @@
   /* Portrait phones: the pad sits BELOW the canvas in the dead space, so
      thumbs never cover the action. Landscape has no spare height, so there
      the pad overlays the margins instead. */
-  #stage{display:flex;align-items:center;justify-content:center;width:100%}
+  #stage{display:flex;align-items:center;justify-content:center;width:100%;touch-action:none}
   body.touch #stage{flex:1 1 auto;min-height:0}
   #touch{display:none;width:100%;position:relative;touch-action:none;
     flex:0 0 clamp(205px,30vh,280px)}
@@ -53,12 +53,22 @@
   #bB{left:0;bottom:64px;width:88px;height:88px;
     background:rgba(240,150,120,.24);border:2px solid rgba(240,150,120,.55)}
 
+  /* A music toggle that touch users can actually reach — the M key is
+     keyboard-only, so on a phone there was no way to silence it at all. */
+  #bM{position:absolute;right:8px;top:8px;width:46px;height:46px;font-size:17px;
+    border-radius:50%;display:flex;align-items:center;justify-content:center;
+    color:rgba(255,255,255,.85);background:rgba(255,255,255,.10);
+    border:2px solid rgba(255,255,255,.24);touch-action:none}
+  #bM.off{opacity:.42}
+  #bM.on{background:rgba(255,255,255,.30)}
+
   @media (orientation:landscape){
     body.touch #touch{position:fixed;inset:0;flex:none;z-index:10;
       pointer-events:none}
     #dpad,#acts{pointer-events:auto}
     #dpad{left:10px;bottom:10px;width:150px;height:150px}
     #acts{right:10px;bottom:10px;width:170px;height:160px}
+    #bM{top:8px;right:8px;width:42px;height:42px}
     #bA{width:92px;height:92px}
     #bB{width:78px;height:78px;bottom:58px}
   }
@@ -72,6 +82,7 @@
       <div class="dp dpL">◀</div><div class="dp dpR">▶</div><div class="dp dpD">▼</div>
       <div id="nub"></div>
     </div>
+    <div class="btn" id="bM">♪</div>
     <div id="acts">
       <div class="btn" id="bB">FIRE</div>
       <div class="btn" id="bA">JUMP</div>
@@ -477,6 +488,38 @@ function bindBtn(id, key) {
 bindBtn('bA', 'a'); bindBtn('bB', 'b');
 
 /* tap the game area to start / advance */
+/* music toggle (touch) */
+{
+  const mb = document.getElementById('bM');
+  const sync = () => mb.classList.toggle('off', !Audio_.musicOn);
+  mb.addEventListener('pointerdown', e => {
+    e.preventDefault(); capture(mb, e.pointerId); mb.classList.add('on'); unlockAudio();
+    Audio_.musicOn = !Audio_.musicOn;
+    if (!Audio_.musicOn) Audio_.stop();
+    else if (G.mode === 'play') Audio_.setTrack(G.world);
+    say('MUSIC ' + (Audio_.musicOn ? 'ON' : 'OFF'), 1.2);
+    sync();
+  });
+  for (const ev of ['pointerup','pointercancel','lostpointercapture'])
+    mb.addEventListener(ev, () => mb.classList.remove('on'));
+  sync();
+}
+
+/* ---- double-tap zoom ----
+   touch-action:manipulation alone did NOT stop it in practice, and iOS
+   Safari deliberately ignores user-scalable=no. Belt and braces: every
+   surface is touch-action:none, WebKit's pinch gesture events are
+   cancelled, and a second tap inside 350ms has its default suppressed. */
+document.addEventListener('gesturestart',  e => e.preventDefault(), { passive:false });
+document.addEventListener('gesturechange', e => e.preventDefault(), { passive:false });
+document.addEventListener('gestureend',    e => e.preventDefault(), { passive:false });
+let _lastTouchEnd = 0;
+document.addEventListener('touchend', e => {
+  const now = Date.now();
+  if (now - _lastTouchEnd <= 350) e.preventDefault();
+  _lastTouchEnd = now;
+}, { passive:false });
+
 cvs.addEventListener('pointerdown', e => { e.preventDefault(); setKey('start', 1); unlockAudio(); });
 for (const ev of ['pointerup', 'pointercancel'])
   cvs.addEventListener(ev, () => { setKey('start', 0); });
