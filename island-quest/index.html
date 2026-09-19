@@ -307,7 +307,7 @@ const Audio_ = {
     if (!AC) return;
     this.ac = new AC();
     this.master = this.ac.createGain();
-    this.master.gain.value = 0.30;
+    this.master.gain.value = 0.22;
     this.master.connect(this.ac.destination);
   },
   resume() { if (this.ac && this.ac.state === 'suspended') this.ac.resume(); },
@@ -351,93 +351,36 @@ const Audio_ = {
     }
   },
 
-  /* ---- Afrobeats-flavoured score ----
-     The groove is what makes music read as afro, not the notes, so there is
-     a real 16-step drum grid under the melody: a syncopated kick landing off
-     the beat, a backbeat clap, hats filling the gaps. Melodies sit in minor
-     pentatonic and phrase in 3-3-2 over the top.
-
-     These are ORIGINAL compositions written for this game. No existing song
-     is transcribed or arranged — that is what keeps the game safe to host
-     publicly under your own name. */
-  bpm: 104,
-  step: 0, stepT: 0, melI: 0, melWait: 0,
-
-  //        1   e   &   a   2   e   &   a   3   e   &   a   4   e   &   a
-  drums: ['K','h','.','K','S','h','K','h','.','h','K','.','S','K','h','h'],
-  bassLine: [0, 0, 5, 7],
-
-  /* [semitone above A3, length in 16ths]; null = rest */
+  /* Per-world melodies. Each entry: [semitone-offset-from-A3 or null, beats] */
   tracks: [
-    // 1 JUNGLE — bright call-and-response
-    [[12,3],[10,3],[7,2],[5,3],[7,3],[10,2],[12,4],[null,2],
-     [10,3],[7,3],[5,2],[3,3],[5,3],[3,2],[0,6]],
-    // 2 CAVERN — low and brooding
-    [[0,3],[3,3],[5,2],[3,3],[0,3],[null,2],[0,4],
-     [7,3],[5,3],[3,2],[0,3],[3,3],[0,2],[null,4]],
-    // 3 GLACIER — high and airy
-    [[15,3],[12,3],[15,2],[17,3],[15,3],[12,2],[10,4],
-     [12,3],[15,3],[17,2],[19,3],[17,3],[15,2],[12,4]],
-    // 4 NIGHTWOOD — sparse, uneasy
-    [[7,3],[10,3],[7,2],[5,3],[3,3],[null,2],[3,4],
-     [5,3],[3,3],[0,2],[null,3],[0,3],[3,2],[0,6]],
-    // 5 HIGHLAND — driving, wide intervals
-    [[0,2],[7,2],[12,3],[10,3],[7,2],[5,2],[7,4],
-     [12,2],[15,2],[12,3],[10,3],[7,2],[5,2],[0,4]],
-    // 6 DEEPCAVE — chromatic unease
-    [[0,3],[1,3],[5,2],[8,3],[5,3],[1,2],[0,4],
-     [8,3],[10,3],[8,2],[5,3],[3,3],[1,2],[0,6]],
-    // 7 VOLCANO — urgent, tight phrasing
-    [[5,2],[8,2],[12,2],[15,2],[12,2],[8,2],[5,4],
-     [3,2],[7,2],[10,2],[14,2],[10,2],[7,2],[3,4]],
-    // 8 SKY TEMPLE — triumphant finale
-    [[0,3],[12,3],[10,2],[7,3],[10,3],[12,2],[15,4],
-     [17,3],[15,3],[12,2],[10,3],[7,3],[5,2],[0,6]]
+    [[4,1],[9,1],[11,1],[12,1],[11,1],[9,1],[7,2],[4,1],[7,1],[9,1],[11,1],[9,1],[7,1],[4,2]],
+    [[0,1],[3,1],[7,1],[10,1],[7,1],[3,1],[0,2],[2,1],[5,1],[9,1],[12,1],[9,1],[5,1],[2,2]],
+    [[7,1],[12,1],[14,1],[16,1],[14,1],[12,1],[11,2],[7,1],[11,1],[12,1],[14,1],[12,1],[11,1],[7,2]],
+    [[2,1],[5,1],[9,1],[14,1],[12,1],[9,1],[5,2],[2,1],[7,1],[10,1],[14,1],[10,1],[7,1],[2,2]],
+    [[9,1],[12,1],[16,1],[19,1],[16,1],[12,1],[9,2],[7,1],[11,1],[14,1],[18,1],[14,1],[11,1],[7,2]],
+    [[0,1],[1,1],[5,1],[8,1],[5,1],[1,1],[0,2],[3,1],[6,1],[10,1],[13,1],[10,1],[6,1],[3,2]],
+    [[5,1],[8,1],[12,1],[17,1],[15,1],[12,1],[8,2],[3,1],[7,1],[10,1],[15,1],[10,1],[7,1],[3,2]],
+    [[0,1],[6,1],[11,1],[12,1],[11,1],[6,1],[0,2],[1,1],[7,1],[12,1],[13,1],[12,1],[7,1],[1,2]]
   ],
+  bass: [0,7,5,7],
 
-  setTrack(i) {
-    this.track = this.tracks[i % this.tracks.length];
-    this.melI = 0; this.melWait = 0; this.step = 0; this.stepT = 0;
-  },
+  setTrack(i) { this.track = this.tracks[i % this.tracks.length]; this.seqI = 0; this.seqT = 0; },
   stop() { this.track = null; },
 
   update(dt) {
     if (!this.ac || !this.track || !this.musicOn) return;
-    this.stepT -= dt;
-    if (this.stepT > 0) return;
-    const sixteenth = 60 / this.bpm / 4;
-    this.stepT = sixteenth;
-
-    /* Everything here must live where a laptop or phone speaker can actually
-       reproduce it. A 64Hz kick and a 55Hz bass measured as 86% of the tonal
-       energy sitting below 200Hz — i.e. inaudible on anything without a
-       woofer, which is why the music went silent. The kick is now a fast
-       pitch drop starting at 190Hz (the attack is what reads as a kick on a
-       small speaker, not the fundamental) and the bass sits an octave up. */
-    const i = this.step % 16;
-    const d = this.drums[i];
-    /* Percussion is deliberately quiet relative to the melody. Broadband
-       noise six times a bar psychoacoustically masks a square wave on small
-       speakers — loud hats are why the tune stopped cutting through. */
-    if (d === 'K') { this.tone(190, .10, 'square', .22, 58); this.noise(.02, .035); }
-    else if (d === 'S') this.noise(.05, .055);                  // clap
-    else if (d === 'h') this.noise(.014, .016);                 // hat
-
-    /* the bass lands off the downbeat too — most of the afro feel is here */
-    if (i === 0 || i === 6 || i === 10) {
-      const b = this.bassLine[Math.floor(this.step / 16) % this.bassLine.length];
-      this.tone(110 * Math.pow(2, b / 12), sixteenth * 3, 'triangle', .11);
+    this.seqT -= dt;
+    if (this.seqT > 0) return;
+    const [semi, beats] = this.track[this.seqI % this.track.length];
+    const spb = 60 / this.bpm;
+    if (semi !== null) {
+      const f = 220 * Math.pow(2, semi / 12);
+      this.tone(f, spb * beats * .85, 'square', .07);
+      const bs = this.bass[Math.floor(this.seqI / 4) % 4];
+      this.tone(110 * Math.pow(2, bs / 12), spb * beats * .9, 'triangle', .09);
     }
-
-    if (this.melWait <= 0) {
-      const [semi, steps] = this.track[this.melI % this.track.length];
-      if (semi !== null)
-        this.tone(220 * Math.pow(2, semi / 12), sixteenth * steps * .9, 'square', .15);
-      this.melWait = steps;
-      this.melI++;
-    }
-    this.melWait--;
-    this.step++;
+    this.seqT = spb * beats;
+    this.seqI++;
   }
 };
 
@@ -965,7 +908,7 @@ function loadStage() {
   P.axe = false; P.board = false; P.fairy = 0;
 
   Audio_.setTrack(G.world);
-  Audio_.bpm = S.boss ? 128 : 104;        // boss fights run hotter
+  Audio_.bpm = S.boss ? 172 : 150;
   G.grace = 2.0;                 // vitality holds while the stage title shows
   const md = MODES[G.world % MODES.length];
   say(`WORLD ${G.world + 1}-${G.area + 1}   ${S.theme.name}` +
