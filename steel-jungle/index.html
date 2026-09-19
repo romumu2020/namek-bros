@@ -142,19 +142,19 @@ const def = (n, r) => SPR[n] = bake(r);
 
 /* --- commando 12x010 ... stand/run/aim --- */
 def('stand', [
-  '...hhhh...','..hhhhhh..','..hssssh..','..hskksh..','..hssssh..',
-  '...ssss...','..bbbbbb..','.bbbbbbbb.','.bbbbbbbb.','b.bbbbbb.b',
-  '..bbbbbb..','..bb..bb..','..bb..bb..','..bb..bb..','.nnn..nnn.','.nnn..nnn.'
+  '...hhhh...','..hhhhhh..','..hsssshh.','..hskksh..','..hssssh..',
+  '...ssss...','..rbbbbr..','.sbbbbbbs.','.sbbbbbbs.','..bbbbbb..',
+  '..bBBBBb..','..bb..bb..','..bb..bb..','..bb..bb..','.nnn..nnn.','.NNN..NNN.'
 ]);
 def('run0', [
-  '...hhhh...','..hhhhhh..','..hssssh..','..hskksh..','..hssssh..',
-  '...ssss...','..bbbbbb..','.bbbbbbbb.','.bbbbbbbbs','.bbbbbbb..',
-  '..bbbbbb..','..bb.bb...','.bb...bb..','.bb....bb.','nnn.....nn','nn.....nnn'
+  '...hhhh...','..hhhhhh..','..hsssshh.','..hskksh..','..hssssh..',
+  '...ssss...','..rbbbbr..','.sbbbbbbs.','.bbbbbbbbs','.bbbbbbb..',
+  '..bBBBBb..','..bb.bb...','.bb...bb..','.bb....bb.','nnn.....nn','NN.....NNN'
 ]);
 def('run1', [
-  '...hhhh...','..hhhhhh..','..hssssh..','..hskksh..','..hssssh..',
-  '...ssss...','..bbbbbb..','.bbbbbbbb.','sbbbbbbbbs','..bbbbbb..',
-  '..bbbbbb..','...bbbb...','..bb..bb..','..bb..bb..','.nnn..nnn.','.nnn..nnn.'
+  '...hhhh...','..hhhhhh..','..hsssshh.','..hskksh..','..hssssh..',
+  '...ssss...','..rbbbbr..','.sbbbbbbs.','sbbbbbbbbs','..bbbbbb..',
+  '..bBBBBb..','...bbbb...','..bb..bb..','..bb..bb..','.nnn..nnn.','.NNN..NNN.'
 ]);
 def('aimup', [
   '.......ss.','...hhhhss.','..hhhhhhs.','..hssssh..','..hskksh..',
@@ -184,14 +184,14 @@ def('dead', [
 
 /* --- enemies --- */
 def('sold0', [
-  '..gggg..','.gggggg.','.gssssg.','.gskksg.','.gssssg.','..gggg..',
-  '.gggggg.','ggggggg.','ggggggg.','.gggggg.','.gg..gg.','.gg..gg.',
-  'nnn..nnn','nnn..nnn'
+  '..GGGG..','.GGGGGG.','.GssssG.','.Gskksg.','.GssssG.','..gggg..',
+  '.rggggr.','Gggggggm','Gggggggm','.GggggG.','.GG..GG.','.gg..gg.',
+  'NNN..NNN','NNN..NNN'
 ]);
 def('sold1', [
-  '..gggg..','.gggggg.','.gssssg.','.gskksg.','.gssssg.','..gggg..',
-  '.gggggg.','gggggggm','gggggggm','.gggggg.','.gg.gg..','gg...gg.',
-  'nn....nn','n......n'
+  '..GGGG..','.GGGGGG.','.GssssG.','.Gskksg.','.GssssG.','..gggg..',
+  '.rggggr.','ggggggmm','ggggggmm','.GggggG.','.Gg.gG..','gg...gg.',
+  'NN....NN','N......N'
 ]);
 def('turret', [
   '..EEEEEE..','.EeeeeeeE.','EeeEEEEeeE','EeE.mm.EeE','EeEmmmmEeE',
@@ -498,7 +498,7 @@ const WEAPON_KEYS = ['M','S','L','F'];
 const G = {
   mode:'title', stage:0, players:1, msg:'', msgT:0, tick:0, timer:0,
   cam:0, camY:0, shake:0, flash:0, page:0, fromTitle:false,
-  hi:0, level:null, depth:0, bossOn:false, bossKilled:false
+  hi:0, level:null, depth:0, bossOn:false, bossKilled:false, waveT:1.2
 };
 try { G.hi = parseInt(localStorage.getItem('sj_hi')||'0',10)||0; } catch(e){}
 let seenHow = false;
@@ -631,7 +631,7 @@ function addScore(p,n){
 function loadStage() {
   const L = genLevel(G.stage);
   G.level = L; G.cam = 0; G.camY = 0; G.depth = 0; G.timer = 0;
-  G.bossOn = false; G.bossKilled = false;
+  G.bossOn = false; G.bossKilled = false; G.waveT = 1.6;
   bullets=[]; ebullets=[]; foes=[]; pods=[]; fx=[];
 
   if (L.type !== 'corridor') {
@@ -821,6 +821,51 @@ function mkFoe(t, x, y) {
   return { ...base, w:10, h:10, score:100 };
 }
 
+/* Contra throws a continuous stream of soldiers at you from ahead rather
+   than parking them on the map. Static placement is most of why this felt
+   flat next to the original, so keep a live wave running while the stage is
+   in progress. */
+function groundYAt(px) {
+  const L = G.level;
+  if (!L || L.type === 'corridor') return null;
+  const tx = Math.floor(px / TS);
+  if (tx < 0 || tx >= L.W) return null;
+  for (let ty = 0; ty < L.H; ty++) {
+    const t = L.grid[tx + ty*L.W];
+    if (t === T_SOLID || t === T_PLAT) return ty*TS;
+  }
+  return null;
+}
+function spawnWave(dt) {
+  const L = G.level;
+  if (L.type !== 'side' || G.bossOn) return;
+  G.waveT -= dt;
+  if (G.waveT > 0) return;
+  G.waveT = Math.max(0.34, 0.92 - G.stage*0.07);   // relentless, like the original
+  const live = foes.filter(f => !f.dead).length;
+  if (live > 15) return;
+  const px = G.cam + VW + 10;
+  const gy = groundYAt(px);
+  if (gy === null) return;
+  const roll = Math.random();
+  if (roll < 0.62) {
+    const f = mkFoe('sold', px, gy);
+    f.y = gy - 14; f.vx = -0.85 - G.stage*0.05;
+    foes.push(f);
+  } else if (roll < 0.86) {
+    const f = mkFoe('drone', px, gy - 60 - Math.random()*24);
+    f.baseY = f.y; f.vx = -1.25 - G.stage*0.05;
+    foes.push(f);
+  } else {
+    // a pair, from slightly further out
+    for (let i=0;i<2;i++) {
+      const f = mkFoe('sold', px + i*16, gy);
+      f.y = gy - 14; f.vx = -1.0 - G.stage*0.05;
+      foes.push(f);
+    }
+  }
+}
+
 function nearestPlayer(x, y) {
   let best = null, bd = 1e9;
   for (const pl of P) {
@@ -843,7 +888,7 @@ function updateFoes(dt) {
 
     if (L.type === 'side') {
       if (f.x < G.cam - 90) { foes.splice(i,1); continue; }
-      if (f.x > G.cam + VW + vis) continue;
+      if (f.x > G.cam + VW + 96) continue;   // wave spawns walk in from off-screen
     } else if (L.type === 'climb') {
       if (f.y > G.camY + VH + 90) { foes.splice(i,1); continue; }
       if (f.y < G.camY - vis) continue;
@@ -1169,6 +1214,7 @@ function step(dt) {
       const L = G.level;
       for (const pl of P) updatePlayer(pl, dt);
       if (L.type === 'corridor') updateCorridor(dt);
+      spawnWave(dt);
       updateFoes(dt); updateBullets(dt); updatePods(dt); updateFx(dt);
       if (boss) updateBoss(dt);
 
@@ -1241,25 +1287,64 @@ function text(t,x,y,col,size,align){
   ctx.textAlign='left';
 }
 
+/* Layered jungle: canopy overhead, silhouetted ridges, trunks with stacked
+   foliage, then undergrowth at the treeline. Four parallax rates so the
+   depth actually reads while scrolling. */
 function drawSideBg(L) {
   const S = L.S;
   ctx.fillStyle = S.sky; ctx.fillRect(0,0,VW,VH);
+
+  // distant ridge line
   ctx.fillStyle = S.far;
-  const off = -(G.cam*.3) % 104;
+  const off = -(G.cam*.22) % 104;
   for (let i=-1;i<VW/104+2;i++) {
     const bx = i*104 + off;
-    ctx.beginPath(); ctx.moveTo(bx,VH); ctx.lineTo(bx+24,VH-70);
-    ctx.lineTo(bx+52,VH-96); ctx.lineTo(bx+82,VH-64); ctx.lineTo(bx+104,VH);
+    ctx.beginPath(); ctx.moveTo(bx,VH); ctx.lineTo(bx+24,VH-74);
+    ctx.lineTo(bx+52,VH-102); ctx.lineTo(bx+82,VH-66); ctx.lineTo(bx+104,VH);
     ctx.closePath(); ctx.fill();
   }
-  ctx.globalAlpha=.4; ctx.fillStyle=S.gndD;
-  const o2 = -(G.cam*.55) % 72;
-  for (let i=-1;i<VW/72+2;i++) {
-    const bx=i*72+o2;
-    ctx.fillRect(bx+28, VH-104, 7, 70);
-    ctx.beginPath(); ctx.arc(bx+31, VH-108, 17, 0, 7); ctx.fill();
+
+  // mid trees: trunk + three stacked canopy tiers
+  const o2 = -(G.cam*.46) % 68;
+  for (let i=-1;i<VW/68+2;i++) {
+    const bx = i*68 + o2, base = VH-42;
+    ctx.globalAlpha = .55;
+    ctx.fillStyle = S.dirtD; ctx.fillRect(bx+30, base-58, 6, 58);
+    ctx.fillStyle = S.gndD;
+    for (let t=0;t<3;t++) {
+      const r = 20 - t*4, cy = base - 58 - t*11;
+      ctx.beginPath(); ctx.ellipse(bx+33, cy, r, r*0.62, 0, 0, 7); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
   }
-  ctx.globalAlpha=1;
+
+  // canopy pressing in from the top
+  const o3 = -(G.cam*.72) % 44;
+  ctx.fillStyle = S.far; ctx.globalAlpha = .85;
+  for (let i=-1;i<VW/44+2;i++) {
+    const bx = i*44 + o3;
+    ctx.beginPath(); ctx.ellipse(bx+22, 4, 26, 15, 0, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = S.far; ctx.fillRect(0,0,VW,6);
+  // hanging vines
+  ctx.strokeStyle = S.gndD; ctx.lineWidth = 1; ctx.globalAlpha = .6;
+  for (let i=-1;i<VW/44+2;i++) {
+    const bx = i*44 + o3 + 14;
+    const len = 16 + ((i*37)%5)*7;
+    ctx.beginPath(); ctx.moveTo(bx, 6);
+    ctx.lineTo(bx + Math.sin(G.tick*1.2 + i)*2, 6+len); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // undergrowth along the treeline
+  const o4 = -(G.cam*.82) % 26;
+  ctx.fillStyle = S.gndD; ctx.globalAlpha = .7;
+  for (let i=-1;i<VW/26+2;i++) {
+    const bx = i*26 + o4;
+    ctx.beginPath(); ctx.ellipse(bx+13, VH-46, 15, 8, 0, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
 }
 function drawTiles(L, camX, camY) {
   const S = L.S;
